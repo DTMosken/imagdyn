@@ -16,7 +16,16 @@ graphs/temperature/Temperature - Annual Mean.png
 graphs/temperature/temperature_meta.json
 graphs/temperature/temperature_stats.json
 graphs/Terrain - Full Elevation.pre_nl.png
+# Local-only terrain / satellite (keep on disk, do not track)
 graphs/Terrain - Elevation Above Sea Level.png
 graphs/Terrain - Elevation Below Sea Level.png
 graphs/Terrain - Full Elevation.png
+graphs/Terrain - Land Mask.png
+graphs/Satellite Color.png
 graphs/Terrain - Contours.png
+graphs/assets.json
+# Local-only terrain remapping (not shipped)
+magdyn/reshape.py
+reshape_terrain.py
+.magdyn_lang
+.magdyn_env
