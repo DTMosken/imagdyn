@@ -1,0 +1,22 @@
+.graphs/
+.graphs/temperature/
+graphs/temperature/Temperature - 01 January.png
+graphs/temperature/Temperature - 02 February.png
+graphs/temperature/Temperature - 03 March.png
+graphs/temperature/Temperature - 04 April.png
+graphs/temperature/Temperature - 05 May.png
+graphs/temperature/Temperature - 06 June.png
+graphs/temperature/Temperature - 07 July.png
+graphs/temperature/Temperature - 08 August.png
+graphs/temperature/Temperature - 09 September.png
+graphs/temperature/Temperature - 10 October.png
+graphs/temperature/Temperature - 11 November.png
+graphs/temperature/Temperature - 12 December.png
+graphs/temperature/Temperature - Annual Mean.png
+graphs/temperature/temperature_meta.json
+graphs/temperature/temperature_stats.json
+graphs/Terrain - Full Elevation.pre_nl.png
+graphs/Terrain - Elevation Above Sea Level.png
+graphs/Terrain - Elevation Below Sea Level.png
+graphs/Terrain - Full Elevation.png
+graphs/Terrain - Contours.png

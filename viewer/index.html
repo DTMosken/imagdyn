@@ -1,0 +1,1455 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Magdyn Map Viewer</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Syne:wght@600;700&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --bg: #12161c;
+      --panel: #1a212b;
+      --panel-edge: #2a3544;
+      --ink: #e8eef4;
+      --muted: #8b9aab;
+      --accent: #d4a574;
+      --accent-dim: #a67c52;
+      --pin: #e07a5f;
+      --cross: rgba(212, 165, 116, 0.85);
+      --shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
+      --font-ui: "Syne", system-ui, sans-serif;
+      --font-data: "IBM Plex Mono", ui-monospace, monospace;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    html, body {
+      height: 100%;
+      background: var(--bg);
+      color: var(--ink);
+      font-family: var(--font-ui);
+      overflow: hidden;
+    }
+
+    body {
+      display: grid;
+      grid-template-rows: auto 1fr;
+      background:
+        radial-gradient(1200px 600px at 10% -10%, #243044 0%, transparent 55%),
+        radial-gradient(900px 500px at 100% 0%, #2a2218 0%, transparent 50%),
+        var(--bg);
+    }
+
+    header {
+      display: flex;
+      align-items: center;
+      gap: 1.25rem;
+      padding: 0.75rem 1.25rem;
+      border-bottom: 1px solid var(--panel-edge);
+      background: rgba(18, 22, 28, 0.85);
+      backdrop-filter: blur(10px);
+      z-index: 5;
+    }
+
+    .brand {
+      font-size: 1.15rem;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      white-space: nowrap;
+    }
+
+    .brand span { color: var(--accent); }
+
+    .controls {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 0.75rem 1rem;
+      flex: 1;
+    }
+
+    label.ctrl {
+      display: flex;
+      align-items: center;
+      gap: 0.45rem;
+      font-size: 0.78rem;
+      color: var(--muted);
+      letter-spacing: 0.03em;
+      text-transform: uppercase;
+    }
+
+    select, button {
+      font-family: var(--font-data);
+      font-size: 0.8rem;
+      color: var(--ink);
+      background: var(--panel);
+      border: 1px solid var(--panel-edge);
+      border-radius: 6px;
+      padding: 0.4rem 0.65rem;
+      outline: none;
+    }
+
+    select { min-width: 16rem; cursor: pointer; }
+    select:hover, button:hover { border-color: var(--accent-dim); }
+    button { cursor: pointer; }
+    button:active { transform: translateY(1px); }
+
+    .toggle {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.4rem;
+      cursor: pointer;
+      user-select: none;
+    }
+
+    .toggle input { accent-color: var(--accent); width: 1rem; height: 1rem; }
+
+    .hint {
+      font-family: var(--font-data);
+      font-size: 0.7rem;
+      color: var(--muted);
+      margin-left: auto;
+      white-space: nowrap;
+    }
+
+    main {
+      position: relative;
+      min-height: 0;
+      display: grid;
+      grid-template-columns: 1fr auto;
+    }
+
+    .viewport {
+      position: relative;
+      overflow: hidden;
+      cursor: crosshair;
+      background:
+        linear-gradient(90deg, rgba(255,255,255,0.03) 1px, transparent 1px),
+        linear-gradient(rgba(255,255,255,0.03) 1px, transparent 1px);
+      background-size: 48px 48px;
+      background-position: center;
+    }
+
+    .viewport.panning { cursor: grabbing; }
+
+    #mapCanvas {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      display: block;
+    }
+
+    .crosshair {
+      position: absolute;
+      pointer-events: none;
+      z-index: 2;
+      opacity: 0;
+      transition: opacity 0.1s;
+    }
+    .crosshair.on { opacity: 1; }
+    .crosshair .h, .crosshair .v {
+      position: absolute;
+      background: var(--cross);
+    }
+    .crosshair .h { left: 0; right: 0; height: 1px; top: 50%; }
+    .crosshair .v { top: 0; bottom: 0; width: 1px; left: 50%; }
+    .crosshair .dot {
+      position: absolute;
+      left: 50%; top: 50%;
+      width: 7px; height: 7px;
+      border-radius: 50%;
+      border: 1.5px solid var(--accent);
+      background: transparent;
+      box-shadow: 0 0 0 1px rgba(0,0,0,0.4);
+      transform: translate(-50%, -50%);
+    }
+
+    .pin-marker {
+      position: absolute;
+      width: 14px; height: 14px;
+      margin: -7px 0 0 -7px;
+      border-radius: 50%;
+      border: 2px solid var(--pin);
+      background: rgba(224, 122, 95, 0.25);
+      box-shadow: 0 0 0 2px rgba(0,0,0,0.35), var(--shadow);
+      pointer-events: none;
+      z-index: 3;
+      display: none;
+    }
+    .pin-marker.on { display: block; }
+
+    .month-nav {
+      position: absolute;
+      left: 50%;
+      bottom: 1rem;
+      transform: translateX(-50%);
+      z-index: 4;
+      display: none;
+      align-items: center;
+      gap: 0.65rem;
+      padding: 0.45rem 0.7rem;
+      background: rgba(18, 22, 28, 0.88);
+      border: 1px solid var(--panel-edge);
+      border-radius: 999px;
+      backdrop-filter: blur(10px);
+      box-shadow: var(--shadow);
+      pointer-events: auto;
+    }
+    .month-nav.show { display: flex; }
+
+    .month-nav button {
+      min-width: 4.5rem;
+      border-radius: 999px;
+      padding: 0.35rem 0.75rem;
+    }
+
+    .month-nav .month-label {
+      font-family: var(--font-data);
+      font-size: 0.82rem;
+      color: var(--accent);
+      min-width: 7.5rem;
+      text-align: center;
+      letter-spacing: 0.02em;
+    }
+
+    .side {
+      width: min(340px, 40vw);
+      background: var(--panel);
+      border-left: 1px solid var(--panel-edge);
+      display: flex;
+      flex-direction: column;
+      z-index: 4;
+      overflow: auto;
+    }
+
+    .card {
+      padding: 1rem 1.1rem;
+      border-bottom: 1px solid var(--panel-edge);
+    }
+
+    .card h2 {
+      font-size: 0.72rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--muted);
+      margin-bottom: 0.65rem;
+      font-weight: 600;
+    }
+
+    .card.pinned h2 { color: var(--pin); }
+
+    .kv {
+      font-family: var(--font-data);
+      font-size: 0.78rem;
+      line-height: 1.55;
+      display: grid;
+      grid-template-columns: 5.5rem 1fr;
+      gap: 0.15rem 0.5rem;
+    }
+
+    .kv .k { color: var(--muted); }
+    .kv .v { color: var(--ink); word-break: break-all; }
+    .kv .v.emph { color: var(--accent); font-weight: 500; }
+
+    .empty {
+      font-family: var(--font-data);
+      font-size: 0.75rem;
+      color: var(--muted);
+      font-style: italic;
+    }
+
+    #legendCard { display: none; }
+    #legendCard.show { display: block; }
+
+    .legend-bar {
+      height: 14px;
+      border-radius: 3px;
+      border: 1px solid var(--panel-edge);
+      margin: 0.4rem 0 0.35rem;
+    }
+
+    .legend-labels {
+      display: flex;
+      justify-content: space-between;
+      font-family: var(--font-data);
+      font-size: 0.68rem;
+      color: var(--muted);
+    }
+
+    .legend-note {
+      margin-top: 0.55rem;
+      font-family: var(--font-data);
+      font-size: 0.68rem;
+      color: var(--muted);
+      line-height: 1.4;
+    }
+
+    .temp-chart-wrap {
+      margin-top: 0.85rem;
+      position: relative;
+      overflow: visible;
+    }
+
+    .temp-chart-wrap .chart-title {
+      font-family: var(--font-data);
+      font-size: 0.68rem;
+      color: var(--muted);
+      margin-bottom: 0.35rem;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+    }
+
+    #pinChart {
+      width: 100%;
+      height: 120px;
+      display: block;
+      background: #12161c;
+      border: 1px solid var(--panel-edge);
+      border-radius: 6px;
+      cursor: crosshair;
+    }
+
+    .chart-tooltip {
+      position: fixed;
+      pointer-events: none;
+      z-index: 50;
+      display: none;
+      padding: 0.3rem 0.5rem;
+      background: rgba(18, 22, 28, 0.96);
+      border: 1px solid var(--panel-edge);
+      border-radius: 4px;
+      font-family: var(--font-data);
+      font-size: 0.72rem;
+      color: var(--ink);
+      white-space: nowrap;
+      box-shadow: var(--shadow);
+      max-width: min(240px, calc(100vw - 16px));
+    }
+    .chart-tooltip.show { display: block; }
+
+    .status {
+      font-family: var(--font-data);
+      font-size: 0.68rem;
+      color: var(--muted);
+      padding: 0.75rem 1.1rem;
+      margin-top: auto;
+      border-top: 1px solid var(--panel-edge);
+    }
+
+    .status.warn { color: var(--pin); }
+
+    .swatch {
+      display: inline-block;
+      width: 0.85rem;
+      height: 0.85rem;
+      border-radius: 2px;
+      border: 1px solid var(--panel-edge);
+      vertical-align: -2px;
+      margin-right: 0.35rem;
+    }
+
+    @media (max-width: 720px) {
+      main { grid-template-columns: 1fr; grid-template-rows: 1fr auto; }
+      .side {
+        width: 100%;
+        max-height: 46vh;
+        border-left: none;
+        border-top: 1px solid var(--panel-edge);
+      }
+      .hint { display: none; }
+      select { min-width: 12rem; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="brand">Magdyn <span>Maps</span></div>
+    <div class="controls">
+      <label class="ctrl">图层
+        <select id="layerSelect" aria-label="选择图层"></select>
+      </label>
+      <label class="toggle ctrl">
+        <input type="checkbox" id="legendToggle" checked />
+        图例
+      </label>
+      <label class="toggle ctrl" title="对地形/气温灰度图套用色阶显示">
+        <input type="checkbox" id="colorScaleToggle" checked />
+        色阶
+      </label>
+      <label class="toggle ctrl" title="用 Land Mask 描边陆地边界">
+        <input type="checkbox" id="coastToggle" checked />
+        陆地描边
+      </label>
+      <label class="toggle ctrl" title="叠加等高线">
+        <input type="checkbox" id="contourToggle" />
+        等高线
+      </label>
+      <button type="button" id="btnReset" title="重置视图">重置视图</button>
+      <button type="button" id="btnClearPin" title="清除固定点">清除固定</button>
+      <div class="hint">滚轮缩放 · 中键/右键拖拽 · 悬停读数 · 单击固定</div>
+    </div>
+  </header>
+
+  <main>
+    <div class="viewport" id="viewport">
+      <canvas id="mapCanvas"></canvas>
+      <div class="crosshair" id="crosshair">
+        <div class="h"></div><div class="v"></div><div class="dot"></div>
+      </div>
+      <div class="pin-marker" id="pinMarker"></div>
+      <div class="month-nav" id="monthNav" aria-label="月份切换">
+        <button type="button" id="btnPrevMonth" title="上个月">‹ 上月</button>
+        <div class="month-label" id="monthLabel">—</div>
+        <button type="button" id="btnNextMonth" title="下个月">下月 ›</button>
+      </div>
+    </div>
+
+    <aside class="side">
+      <div class="card" id="hoverCard">
+        <h2>悬停</h2>
+        <div id="hoverData" class="empty">将鼠标移到地图上</div>
+      </div>
+      <div class="card pinned" id="pinCard">
+        <h2>固定点</h2>
+        <div id="pinData" class="empty">单击地图以固定读数</div>
+      </div>
+      <div class="card" id="legendCard">
+        <h2>图例</h2>
+        <div id="legendBody"></div>
+      </div>
+      <div class="status" id="status">准备加载…</div>
+    </aside>
+  </main>
+
+  <script>
+(() => {
+  const TEMP_META_URL = "../graphs/temperature/temperature_meta.json";
+  const LAND_MASK_URL = "../graphs/Terrain - Land Mask.png";
+  const ELEV_URL = "../graphs/Terrain - Full Elevation.png";
+
+  const CONTOUR_URL = "../graphs/Terrain - Contours.png";
+
+  const MONTH_NAMES = [
+    "January | 1", "February | 2", "March | 3", "April | 4", "May | 5", "June | 6",
+    "July | 7", "August | 8", "September | 9", "October | 10", "November | 11", "December | 12",
+  ];
+
+  const TEMP_LAYERS = [
+    { id: "t-ann", name: "Temperature — Annual Mean", src: "../graphs/temperature/Temperature - Annual Mean.png", monthIndex: -1 },
+    { id: "t-01", name: "Temperature — 01 January", src: "../graphs/temperature/Temperature - 01 January.png", monthIndex: 0 },
+    { id: "t-02", name: "Temperature — 02 February", src: "../graphs/temperature/Temperature - 02 February.png", monthIndex: 1 },
+    { id: "t-03", name: "Temperature — 03 March", src: "../graphs/temperature/Temperature - 03 March.png", monthIndex: 2 },
+    { id: "t-04", name: "Temperature — 04 April", src: "../graphs/temperature/Temperature - 04 April.png", monthIndex: 3 },
+    { id: "t-05", name: "Temperature — 05 May", src: "../graphs/temperature/Temperature - 05 May.png", monthIndex: 4 },
+    { id: "t-06", name: "Temperature — 06 June", src: "../graphs/temperature/Temperature - 06 June.png", monthIndex: 5 },
+    { id: "t-07", name: "Temperature — 07 July", src: "../graphs/temperature/Temperature - 07 July.png", monthIndex: 6 },
+    { id: "t-08", name: "Temperature — 08 August", src: "../graphs/temperature/Temperature - 08 August.png", monthIndex: 7 },
+    { id: "t-09", name: "Temperature — 09 September", src: "../graphs/temperature/Temperature - 09 September.png", monthIndex: 8 },
+    { id: "t-10", name: "Temperature — 10 October", src: "../graphs/temperature/Temperature - 10 October.png", monthIndex: 9 },
+    { id: "t-11", name: "Temperature — 11 November", src: "../graphs/temperature/Temperature - 11 November.png", monthIndex: 10 },
+    { id: "t-12", name: "Temperature — 12 December", src: "../graphs/temperature/Temperature - 12 December.png", monthIndex: 11 },
+  ];
+
+  /** @type {{ id: string, name: string, group: string, src: string, kind: string, monthIndex?: number }[]} */
+  const LAYERS = [
+    { id: "sat", name: "Satellite Color", group: "Base", src: "../graphs/Satellite Color.png", kind: "rgb" },
+    { id: "elev-full", name: "Terrain — Full Elevation", group: "Terrain", src: ELEV_URL, kind: "elev_full" },
+    ...TEMP_LAYERS.map((t) => ({
+      id: t.id,
+      name: t.name,
+      group: "Temperature",
+      src: t.src,
+      kind: "temperature",
+      monthIndex: t.monthIndex,
+    })),
+  ];
+
+  const state = {
+    layer: LAYERS.find((l) => l.id === "t-ann") || LAYERS[0],
+    img: null,
+    coastOverlay: null,
+    contourOverlay: null,
+    pixels: null,
+    iw: 0,
+    ih: 0,
+    scale: 1,
+    tx: 0,
+    ty: 0,
+    hover: null,
+    pin: null,
+    panning: false,
+    panOrigin: null,
+    didPan: false,
+    tempMeta: {
+      gray_scale_C: [-60, 45],
+      max_elev_m: 8000,
+      freeze_C: 0,
+    },
+    /** Global chart Y axis: same range & step for every pin */
+    chartY: { min: -60, max: 45, step: 15 },
+    showLegend: true,
+    useColorScale: true,
+    showCoast: true,
+    showContours: false,
+    chartPoints: /** @type {{ i: number, x: number, y: number, t: number }[]} */ ([]),
+    // Global data (Uint8 grayscale / land bit)
+    land: null,
+    elevGray: null,
+    tempAnnual: null,
+    tempMonths: /** @type {(Uint8Array|null)[]} */ (Array(12).fill(null)),
+    dataReady: false,
+  };
+
+  const els = {
+    select: document.getElementById("layerSelect"),
+    legendToggle: document.getElementById("legendToggle"),
+    colorScaleToggle: document.getElementById("colorScaleToggle"),
+    coastToggle: document.getElementById("coastToggle"),
+    contourToggle: document.getElementById("contourToggle"),
+    btnReset: document.getElementById("btnReset"),
+    btnClearPin: document.getElementById("btnClearPin"),
+    viewport: document.getElementById("viewport"),
+    canvas: document.getElementById("mapCanvas"),
+    crosshair: document.getElementById("crosshair"),
+    pinMarker: document.getElementById("pinMarker"),
+    monthNav: document.getElementById("monthNav"),
+    monthLabel: document.getElementById("monthLabel"),
+    btnPrevMonth: document.getElementById("btnPrevMonth"),
+    btnNextMonth: document.getElementById("btnNextMonth"),
+    hoverData: document.getElementById("hoverData"),
+    pinData: document.getElementById("pinData"),
+    legendCard: document.getElementById("legendCard"),
+    legendBody: document.getElementById("legendBody"),
+    status: document.getElementById("status"),
+  };
+
+  const ctx = els.canvas.getContext("2d", { alpha: false });
+  const lutCache = new Map();
+
+  function lerp(a, b, t) { return a + (b - a) * t; }
+  function lerpRgb(c0, c1, t) {
+    return [Math.round(lerp(c0[0], c1[0], t)), Math.round(lerp(c0[1], c1[1], t)), Math.round(lerp(c0[2], c1[2], t))];
+  }
+  function sampleStops(stops, t) {
+    t = Math.min(1, Math.max(0, t));
+    for (let i = 0; i < stops.length - 1; i++) {
+      const a = stops[i], b = stops[i + 1];
+      if (t >= a[0] && t <= b[0]) return lerpRgb(a[1], b[1], (t - a[0]) / (b[0] - a[0] || 1));
+    }
+    return stops[stops.length - 1][1];
+  }
+
+  const COLOR_STOPS = {
+    temperature: [
+      [0.0, [8, 16, 48]], [0.22, [30, 80, 160]], [0.38, [70, 180, 200]],
+      [0.5, [120, 200, 120]], [0.62, [230, 210, 90]], [0.78, [220, 110, 50]], [1.0, [140, 20, 30]],
+    ],
+    elev_full: [
+      // ≤0 m: deep navy → shallow light blue (hard stop at sea level)
+      [0.0, [2, 10, 48]],
+      [0.20, [8, 40, 110]],
+      [0.35, [18, 90, 165]],
+      [0.45, [55, 150, 210]],
+      [0.5, [155, 210, 240]],
+      // >0 m: clearer hypsometric steps (≈0 / 1k / 2k / 3k / peak)
+      [0.50001, [145, 210, 115]],   // low plain — light green
+      [0.5625, [55, 150, 70]],      // ~1000 m — deeper green
+      [0.59375, [170, 195, 75]],    // ~1500 m — yellow-green
+      [0.625, [210, 175, 70]],      // ~2000 m — gold
+      [0.6875, [185, 110, 55]],     // ~3000 m — orange-brown
+      [0.80, [150, 75, 50]],        // high — brown
+      [0.92, [210, 205, 200]],      // near peak
+      [1.0, [250, 250, 252]],
+    ],
+  };
+
+  const LEGEND_CSS = {
+    temperature: "linear-gradient(90deg, #081030, #1e50a0, #46b4c8, #78c878, #e6d25a, #dc6e32, #8c141e)",
+    elev_full: "linear-gradient(90deg, #020a30, #08286e, #125aa5, #3796d2, #9bd2f0 50%, #91d273 50%, #379646, #aac34b, #d2af46, #b96e37, #964b32, #d2cdc8, #fafafc)",
+    contours: "linear-gradient(90deg, #0a1828, #2a3a30, #c8b880)",
+    rgb: "linear-gradient(90deg, #1a2a1a, #3a5a7a, #c4a070, #e8e0d0)",
+  };
+
+  function supportsColorScale(kind) {
+    return kind === "temperature" || kind === "elev_full";
+  }
+
+  function getLut(kind) {
+    if (lutCache.has(kind)) return lutCache.get(kind);
+    const stops = COLOR_STOPS[kind];
+    const lut = new Uint8ClampedArray(256 * 4);
+    for (let g = 0; g < 256; g++) {
+      const t = g / 255;
+      let rgb;
+      if (kind === "elev_full") {
+        // Hard split: ≤ sea level → light-blue family; >0 → ≥ light green
+        if (t <= 0.5) rgb = sampleStops(stops, t);
+        else rgb = sampleStops(stops, Math.max(t, 0.50001));
+      } else {
+        rgb = sampleStops(stops, t);
+      }
+      const [r, gv, b] = rgb;
+      const i = g * 4;
+      lut[i] = r; lut[i + 1] = gv; lut[i + 2] = b; lut[i + 3] = 255;
+    }
+    lutCache.set(kind, lut);
+    return lut;
+  }
+
+  function loadImage(url) {
+    return new Promise((resolve, reject) => {
+      const img = new Image();
+      img.decoding = "async";
+      img.onload = () => resolve(img);
+      img.onerror = () => reject(new Error(`无法加载 ${url}`));
+      img.src = url;
+    });
+  }
+
+  function imageToGray(img) {
+    const c = document.createElement("canvas");
+    c.width = img.naturalWidth;
+    c.height = img.naturalHeight;
+    const x = c.getContext("2d", { willReadFrequently: true });
+    x.drawImage(img, 0, 0);
+    const rgba = x.getImageData(0, 0, c.width, c.height).data;
+    const gray = new Uint8Array(c.width * c.height);
+    for (let i = 0, j = 0; i < rgba.length; i += 4, j++) gray[j] = rgba[i];
+    return { gray, w: c.width, h: c.height };
+  }
+
+  function buildCoastOverlay(land, w, h) {
+    const edge = new Uint8Array(w * h);
+    for (let y = 0; y < h; y++) {
+      for (let xx = 0; xx < w; xx++) {
+        const i = y * w + xx;
+        if (!land[i]) continue;
+        const n =
+          !land[y * w + ((xx - 1 + w) % w)] ||
+          !land[y * w + ((xx + 1) % w)] ||
+          (y > 0 && !land[i - w]) ||
+          (y < h - 1 && !land[i + w]);
+        if (n) edge[i] = 1;
+      }
+    }
+    // Thicken coastline (~2px)
+    const thick = new Uint8Array(w * h);
+    for (let y = 0; y < h; y++) {
+      for (let xx = 0; xx < w; xx++) {
+        const i = y * w + xx;
+        if (!edge[i]) continue;
+        for (let dy = -1; dy <= 1; dy++) {
+          for (let dx = -1; dx <= 1; dx++) {
+            const yy = y + dy;
+            if (yy < 0 || yy >= h) continue;
+            const xi = (xx + dx + w) % w;
+            thick[yy * w + xi] = 1;
+          }
+        }
+      }
+    }
+    const c = document.createElement("canvas");
+    c.width = w;
+    c.height = h;
+    const x = c.getContext("2d");
+    const img = x.createImageData(w, h);
+    const d = img.data;
+    const edgeColor = [150, 150, 155, 220];
+    for (let i = 0; i < thick.length; i++) {
+      if (!thick[i]) continue;
+      const p = i * 4;
+      d[p] = edgeColor[0];
+      d[p + 1] = edgeColor[1];
+      d[p + 2] = edgeColor[2];
+      d[p + 3] = edgeColor[3];
+    }
+    x.putImageData(img, 0, 0);
+    return c;
+  }
+
+  function buildContourOverlay(img) {
+    const w = img.naturalWidth;
+    const h = img.naturalHeight;
+    const c = document.createElement("canvas");
+    c.width = w;
+    c.height = h;
+    const x = c.getContext("2d", { willReadFrequently: true });
+    x.drawImage(img, 0, 0);
+    const src = x.getImageData(0, 0, w, h);
+    const dst = x.createImageData(w, h);
+    const s = src.data;
+    const d = dst.data;
+    // Keep bright contour / coast strokes; drop dark wash background
+    for (let i = 0; i < s.length; i += 4) {
+      const r = s[i], g = s[i + 1], b = s[i + 2];
+      const lum = (r + g + b) / 3;
+      if (lum < 125) continue;
+      d[i] = Math.min(255, r + 22);
+      d[i + 1] = Math.min(255, g + 16);
+      d[i + 2] = Math.min(255, b + 4);
+      d[i + 3] = Math.min(235, Math.round((lum - 96) * 2.3));
+    }
+    x.putImageData(dst, 0, 0);
+    return c;
+  }
+
+  function buildDisplayImage() {
+    if (!state.pixels || !state.iw) return null;
+    const kind = state.layer.kind;
+    const off = document.createElement("canvas");
+    off.width = state.iw;
+    off.height = state.ih;
+    const octx = off.getContext("2d");
+    const imgData = octx.createImageData(state.iw, state.ih);
+    const src = state.pixels;
+    const dst = imgData.data;
+
+    if (state.useColorScale && supportsColorScale(kind)) {
+      const lut = getLut(kind);
+      for (let i = 0, n = src.length; i < n; i += 4) {
+        const j = src[i] * 4;
+        dst[i] = lut[j]; dst[i + 1] = lut[j + 1]; dst[i + 2] = lut[j + 2]; dst[i + 3] = 255;
+      }
+    } else {
+      dst.set(src);
+    }
+    octx.putImageData(imgData, 0, 0);
+    return off;
+  }
+
+  function fillSelect() {
+    const groups = [...new Set(LAYERS.map((l) => l.group))];
+    for (const g of groups) {
+      const og = document.createElement("optgroup");
+      og.label = g;
+      for (const layer of LAYERS.filter((l) => l.group === g)) {
+        const opt = document.createElement("option");
+        opt.value = layer.id;
+        opt.textContent = layer.name;
+        if (layer.id === state.layer.id) opt.selected = true;
+        og.appendChild(opt);
+      }
+      els.select.appendChild(og);
+    }
+  }
+
+  function setStatus(msg, warn = false) {
+    els.status.textContent = msg;
+    els.status.classList.toggle("warn", warn);
+  }
+
+  function fitView() {
+    const rect = els.viewport.getBoundingClientRect();
+    const pad = 24;
+    state.scale = Math.min((rect.width - pad * 2) / state.iw, (rect.height - pad * 2) / state.ih);
+    state.tx = (rect.width - state.iw * state.scale) / 2;
+    state.ty = (rect.height - state.ih * state.scale) / 2;
+  }
+
+  function resizeCanvas() {
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const rect = els.viewport.getBoundingClientRect();
+    els.canvas.width = Math.max(1, Math.floor(rect.width * dpr));
+    els.canvas.height = Math.max(1, Math.floor(rect.height * dpr));
+    els.canvas.style.width = `${rect.width}px`;
+    els.canvas.style.height = `${rect.height}px`;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    draw();
+  }
+
+  function draw() {
+    const rect = els.viewport.getBoundingClientRect();
+    ctx.fillStyle = "#0c1015";
+    ctx.fillRect(0, 0, rect.width, rect.height);
+    if (!state.img || !state.iw) return;
+    ctx.imageSmoothingEnabled = state.scale < 1.5;
+    ctx.imageSmoothingQuality = "high";
+    const dw = state.iw * state.scale;
+    const dh = state.ih * state.scale;
+    // Longitude wraps: tile map copies so left/right edges meet
+    const first = Math.floor((0 - state.tx) / dw) - 1;
+    const last = Math.ceil((rect.width - state.tx) / dw) + 1;
+    for (let k = first; k <= last; k++) {
+      const x = state.tx + k * dw;
+      ctx.drawImage(state.img, x, state.ty, dw, dh);
+    }
+    if (state.showCoast && state.coastOverlay) {
+      ctx.imageSmoothingEnabled = false;
+      for (let k = first; k <= last; k++) {
+        ctx.drawImage(state.coastOverlay, state.tx + k * dw, state.ty, dw, dh);
+      }
+    }
+    if (state.showContours && state.contourOverlay) {
+      ctx.imageSmoothingEnabled = state.scale < 2;
+      for (let k = first; k <= last; k++) {
+        ctx.drawImage(state.contourOverlay, state.tx + k * dw, state.ty, dw, dh);
+      }
+    }
+  }
+
+  function wrapX(x) {
+    const w = state.iw;
+    if (!w) return x;
+    return ((x % w) + w) % w;
+  }
+
+  function screenToImageRaw(clientX, clientY) {
+    const rect = els.viewport.getBoundingClientRect();
+    return {
+      x: (clientX - rect.left - state.tx) / state.scale,
+      y: (clientY - rect.top - state.ty) / state.scale,
+    };
+  }
+
+  function screenToImage(clientX, clientY) {
+    const raw = screenToImageRaw(clientX, clientY);
+    return { x: wrapX(raw.x), y: raw.y };
+  }
+
+  function imageToScreen(ix, iy) {
+    const rect = els.viewport.getBoundingClientRect();
+    const dw = state.iw * state.scale;
+    const baseX = state.tx + ix * state.scale;
+    const y = state.ty + iy * state.scale;
+    if (!dw) return { x: baseX, y };
+    let best = baseX;
+    let bestScore = Infinity;
+    const first = Math.floor((0 - baseX) / dw) - 1;
+    const last = Math.ceil((rect.width - baseX) / dw) + 1;
+    for (let k = first; k <= last; k++) {
+      const x = baseX + k * dw;
+      if (x < -40 || x > rect.width + 40) continue;
+      const score = Math.abs(x - rect.width * 0.5);
+      if (score < bestScore) {
+        bestScore = score;
+        best = x;
+      }
+    }
+    return { x: best, y };
+  }
+
+  function clampPixel(ix, iy) {
+    if (!state.iw || !state.ih) return null;
+    const y = Math.floor(iy);
+    if (y < 0 || y >= state.ih) return null;
+    const x = Math.floor(wrapX(ix));
+    return { x, y };
+  }
+
+  function grayToRGBA(gray) {
+    const rgba = new Uint8ClampedArray(gray.length * 4);
+    for (let i = 0, j = 0; i < gray.length; i++, j += 4) {
+      const g = gray[i];
+      rgba[j] = g;
+      rgba[j + 1] = g;
+      rgba[j + 2] = g;
+      rgba[j + 3] = 255;
+    }
+    return rgba;
+  }
+
+  function isMonthlyTemp(layer) {
+    return layer.kind === "temperature" && typeof layer.monthIndex === "number" && layer.monthIndex >= 0;
+  }
+
+  function updateMonthNav() {
+    const show = isMonthlyTemp(state.layer);
+    els.monthNav.classList.toggle("show", show);
+    if (show) {
+      els.monthLabel.textContent = MONTH_NAMES[state.layer.monthIndex];
+      els.select.value = state.layer.id;
+    }
+  }
+
+  async function shiftMonth(delta) {
+    if (!isMonthlyTemp(state.layer)) return;
+    const next = (state.layer.monthIndex + delta + 12) % 12;
+    const layer = LAYERS.find((l) => l.monthIndex === next);
+    if (!layer) return;
+    els.select.value = layer.id;
+    await loadLayer(layer, { keepView: true });
+  }
+
+  function grayAt(arr, px, py) {
+    if (!arr) return null;
+    return arr[py * state.iw + px];
+  }
+
+  function tempFromGray(g) {
+    const [tMin, tMax] = state.tempMeta.gray_scale_C;
+    return tMin + (g / 255) * (tMax - tMin);
+  }
+
+  function elevFromGray(g, isLand) {
+    const maxElev = state.tempMeta.max_elev_m || 8000;
+    const v01 = g / 255;
+    if (isLand) {
+      return Math.max(0, ((v01 - 0.5) / 0.5) * maxElev);
+    }
+    // Linear bathymetry (same scale as land max)
+    return -Math.max(0, ((0.5 - v01) / 0.5) * maxElev);
+  }
+
+  function legendFor(kind) {
+    const [tMin, tMax] = state.tempMeta.gray_scale_C;
+    const maxElev = state.tempMeta.max_elev_m || 8000;
+    if (kind === "temperature") {
+      return {
+        title: "气温",
+        gradient: LEGEND_CSS.temperature,
+        left: `${tMin} °C`,
+        right: `${tMax} °C`,
+        note: "海陆类型由 Land Mask 判定；封冻：温度 ≤ 0 °C。",
+      };
+    }
+    if (kind === "elev_full") {
+      return {
+        title: "全海拔",
+        gradient: state.useColorScale ? LEGEND_CSS.elev_full : "linear-gradient(90deg,#050505,#808080 50%,#fff)",
+        left: `深海 (−${maxElev} m)`,
+        right: `高峰 (+${maxElev} m)`,
+        note: "0.5 = 海平面；≤0 浅蓝，>0 按海拔分色（约 1/1.5/2/3 km 更易辨识）。",
+      };
+    }
+    return {
+      title: "真彩",
+      gradient: LEGEND_CSS.rgb,
+      left: "暗",
+      right: "亮",
+      note: "卫星真彩色。",
+    };
+  }
+
+  function displayColor(rgba) {
+    if (state.useColorScale && supportsColorScale(state.layer.kind)) {
+      const lut = getLut(state.layer.kind);
+      const j = rgba.r * 4;
+      return { r: lut[j], g: lut[j + 1], b: lut[j + 2] };
+    }
+    return { r: rgba.r, g: rgba.g, b: rgba.b };
+  }
+
+  function formatReadout(sample, withChart = false) {
+    if (!sample) return '<div class="empty">超出图像范围</div>';
+    const { lat, lon } = sample.ll;
+    const sw = displayColor(sample.rgba);
+    const swatch = `rgb(${sw.r},${sw.g},${sw.b})`;
+    const freezeC = state.tempMeta.freeze_C ?? 0;
+    const rows = [
+      ["纬度", `${lat.toFixed(4)}°`],
+      ["经度", `${lon.toFixed(4)}°`],
+      ["类型", sample.isLand ? "陆地" : "海洋"],
+      ["海拔/水深", sample.isLand ? `+${sample.elevM.toFixed(0)} m` : `−${Math.abs(sample.elevM).toFixed(0)} m`],
+      ["温度", sample.tC == null ? "—" : `${sample.tC.toFixed(2)} °C`],
+      ["封冻", sample.tC == null ? "—" : (sample.tC <= freezeC ? "是" : "否")],
+      ["颜色", `<span class="swatch" style="background:${swatch}"></span>${swatch}`],
+    ];
+    const html = rows
+      .map(([k, v]) => `<div class="k">${k}</div><div class="v${k === "温度" || k === "类型" ? " emph" : ""}">${v}</div>`)
+      .join("");
+
+    let chart = "";
+    if (withChart) {
+      const meanTxt = sample.tMean == null ? "—" : `${sample.tMean.toFixed(1)} °C`;
+      chart = `
+        <div class="temp-chart-wrap">
+          <div class="chart-title">年温度变化 · 均温 ${meanTxt}（虚线）</div>
+          <canvas id="pinChart" width="300" height="120"></canvas>
+          <div class="chart-tooltip" id="chartTooltip"></div>
+        </div>`;
+    }
+    return `<div class="kv">${html}</div>${chart}`;
+  }
+
+  function syncChartAxisFromMeta() {
+    const [tMin, tMax] = state.tempMeta.gray_scale_C;
+    // Nice global step shared by all pin charts
+    const span = tMax - tMin;
+    let step = 15;
+    if (span <= 60) step = 10;
+    if (span <= 40) step = 5;
+    if (span > 120) step = 20;
+    state.chartY = { min: tMin, max: tMax, step };
+  }
+
+  function placeChartTooltip(tip, clientX, clientY) {
+    tip.classList.add("show");
+    // Measure after content is set
+    const pad = 8;
+    const tw = tip.offsetWidth || 120;
+    const th = tip.offsetHeight || 28;
+    let left = clientX + 14;
+    let top = clientY - th - 10;
+    if (left + tw > window.innerWidth - pad) left = clientX - tw - 14;
+    if (left < pad) left = pad;
+    if (top < pad) top = clientY + 14;
+    if (top + th > window.innerHeight - pad) {
+      top = Math.max(pad, window.innerHeight - th - pad);
+    }
+    tip.style.left = `${left}px`;
+    tip.style.top = `${top}px`;
+  }
+
+  function drawPinChart(monthly, tMean) {
+    const canvas = document.getElementById("pinChart");
+    const tip = document.getElementById("chartTooltip");
+    if (!canvas || !monthly) return;
+    const c = canvas.getContext("2d");
+    const W = canvas.width;
+    const H = canvas.height;
+    const pad = { l: 32, r: 8, t: 10, b: 22 };
+    c.clearRect(0, 0, W, H);
+    c.fillStyle = "#12161c";
+    c.fillRect(0, 0, W, H);
+
+    const vals = monthly.filter((v) => v != null);
+    if (!vals.length) return;
+    const mean = tMean != null ? tMean : vals.reduce((a, b) => a + b, 0) / vals.length;
+
+    // Global axis — identical for every pin
+    const ymin = state.chartY.min;
+    const ymax = state.chartY.max;
+    const yStep = state.chartY.step;
+    const ySpan = ymax - ymin || 1;
+
+    const xAt = (i) => pad.l + (i / 11) * (W - pad.l - pad.r);
+    const yAt = (v) => pad.t + (1 - (v - ymin) / ySpan) * (H - pad.t - pad.b);
+
+    c.strokeStyle = "#2a3544";
+    c.lineWidth = 1;
+    c.beginPath();
+    c.moveTo(pad.l, pad.t);
+    c.lineTo(pad.l, H - pad.b);
+    c.lineTo(W - pad.r, H - pad.b);
+    c.stroke();
+
+    // Horizontal grid + labels at global step
+    c.font = "10px IBM Plex Mono, monospace";
+    c.textAlign = "right";
+    c.textBaseline = "middle";
+    const tick0 = Math.ceil(ymin / yStep) * yStep;
+    for (let t = tick0; t <= ymax + 1e-6; t += yStep) {
+      const y = yAt(t);
+      c.strokeStyle = "rgba(42,53,68,0.85)";
+      c.beginPath();
+      c.moveTo(pad.l, y);
+      c.lineTo(W - pad.r, y);
+      c.stroke();
+      c.fillStyle = "#8b9aab";
+      c.fillText(`${Math.round(t)}`, pad.l - 4, y);
+    }
+
+    c.textAlign = "center";
+    c.textBaseline = "alphabetic";
+    c.fillStyle = "#8b9aab";
+    for (let i = 0; i < 12; i += 2) c.fillText(String(i + 1), xAt(i), H - 6);
+
+    const yMean = yAt(mean);
+    c.strokeStyle = "rgba(212,165,116,0.9)";
+    c.lineWidth = 1.25;
+    c.setLineDash([4, 4]);
+    c.beginPath();
+    c.moveTo(pad.l, yMean);
+    c.lineTo(W - pad.r, yMean);
+    c.stroke();
+    c.setLineDash([]);
+
+    c.strokeStyle = "#e07a5f";
+    c.lineWidth = 1.75;
+    c.beginPath();
+    let started = false;
+    for (let i = 0; i < 12; i++) {
+      if (monthly[i] == null) continue;
+      const x = xAt(i);
+      const y = yAt(monthly[i]);
+      if (!started) {
+        c.moveTo(x, y);
+        started = true;
+      } else c.lineTo(x, y);
+    }
+    c.stroke();
+
+    const activeMonth =
+      isMonthlyTemp(state.layer) ? state.layer.monthIndex : -1;
+    state.chartPoints = [];
+    for (let i = 0; i < 12; i++) {
+      if (monthly[i] == null) continue;
+      const x = xAt(i);
+      const y = yAt(monthly[i]);
+      state.chartPoints.push({ i, x, y, t: monthly[i] });
+      const active = i === activeMonth;
+      c.beginPath();
+      c.arc(x, y, active ? 4.2 : 2.6, 0, Math.PI * 2);
+      c.fillStyle = active ? "#f0c090" : "#e07a5f";
+      c.fill();
+      if (active) {
+        c.strokeStyle = "#fff";
+        c.lineWidth = 1;
+        c.stroke();
+      }
+    }
+
+    if (tip) {
+      tip.classList.remove("show");
+      canvas.onmousemove = (ev) => {
+        const rect = canvas.getBoundingClientRect();
+        const sx = ((ev.clientX - rect.left) / rect.width) * W;
+        const sy = ((ev.clientY - rect.top) / rect.height) * H;
+        let best = null;
+        let bestD = 14;
+        for (const p of state.chartPoints) {
+          const d = Math.hypot(p.x - sx, p.y - sy);
+          if (d < bestD) {
+            bestD = d;
+            best = p;
+          }
+        }
+        if (!best) {
+          tip.classList.remove("show");
+          return;
+        }
+        tip.textContent = `${MONTH_NAMES[best.i]}: ${best.t.toFixed(2)} °C`;
+        placeChartTooltip(tip, ev.clientX, ev.clientY);
+      };
+      canvas.onmouseleave = () => tip.classList.remove("show");
+    }
+  }
+
+  function readAt(ix, iy) {
+    const p = clampPixel(ix, iy);
+    if (!p || !state.pixels) return null;
+    const i = (p.y * state.iw + p.x) * 4;
+    const d = state.pixels;
+    const rgba = { r: d[i], g: d[i + 1], b: d[i + 2], a: d[i + 3] };
+    const lon = (p.x + 0.5) * (360 / state.iw) - 180;
+    const lat = 90 - (p.y + 0.5) * (180 / state.ih);
+
+    const isLand = state.land ? state.land[p.y * state.iw + p.x] === 1 : rgba.r > 127;
+    const elevG = state.elevGray ? grayAt(state.elevGray, p.x, p.y) : null;
+    const elevM = elevG == null ? 0 : elevFromGray(elevG, isLand);
+
+    const monthly = [];
+    for (let m = 0; m < 12; m++) {
+      const g = state.tempMonths[m] ? grayAt(state.tempMonths[m], p.x, p.y) : null;
+      monthly.push(g == null ? null : tempFromGray(g));
+    }
+    const present = monthly.filter((v) => v != null);
+    const tMean = present.length
+      ? present.reduce((a, b) => a + b, 0) / present.length
+      : null;
+
+    // Temperature shown = same source as map layer (and chart point for that month)
+    let tC = null;
+    const mi = state.layer.monthIndex;
+    if (state.layer.kind === "temperature" && typeof mi === "number" && mi >= 0) {
+      tC = monthly[mi];
+    } else if (state.layer.kind === "temperature" && mi === -1) {
+      // Annual layer: decode the same gray the map displays
+      tC = tempFromGray(rgba.r);
+    } else if (tMean != null) {
+      tC = tMean;
+    }
+
+    const tAnnG = state.tempAnnual ? grayAt(state.tempAnnual, p.x, p.y) : null;
+    const tAnnual = tAnnG == null ? null : tempFromGray(tAnnG);
+
+    return {
+      px: p.x,
+      py: p.y,
+      rgba,
+      ll: { lat, lon },
+      isLand,
+      elevM,
+      tC,
+      tAnnual,
+      tMean,
+      monthly,
+    };
+  }
+
+  function updateLegend() {
+    if (!state.showLegend) {
+      els.legendCard.classList.remove("show");
+      return;
+    }
+    els.legendCard.classList.add("show");
+    const L = legendFor(state.layer.kind);
+    els.legendBody.innerHTML = `
+      <div style="font-family:var(--font-data);font-size:0.78rem;margin-bottom:0.25rem">${L.title}</div>
+      <div class="legend-bar" style="background:${L.gradient}"></div>
+      <div class="legend-labels"><span>${L.left}</span><span>${L.right}</span></div>
+      <div class="legend-note">${L.note}</div>
+    `;
+  }
+
+  function updateHoverUI(sample, clientX, clientY) {
+    state.hover = sample;
+    if (!sample) {
+      els.crosshair.classList.remove("on");
+      els.hoverData.innerHTML = '<div class="empty">超出图像范围</div>';
+      return;
+    }
+    const rect = els.viewport.getBoundingClientRect();
+    const sx = clientX - rect.left;
+    const sy = clientY - rect.top;
+    els.crosshair.classList.add("on");
+    els.crosshair.querySelector(".h").style.top = `${sy}px`;
+    els.crosshair.querySelector(".v").style.left = `${sx}px`;
+    const dot = els.crosshair.querySelector(".dot");
+    dot.style.left = `${sx}px`;
+    dot.style.top = `${sy}px`;
+    els.hoverData.innerHTML = formatReadout(sample, false);
+  }
+
+  function updatePinUI() {
+    if (!state.pin) {
+      els.pinMarker.classList.remove("on");
+      els.pinData.innerHTML = '<div class="empty">单击地图以固定读数</div>';
+      return;
+    }
+    const sample = readAt(state.pin.px + 0.5, state.pin.py + 0.5);
+    if (sample) state.pin = sample;
+    const s = imageToScreen(state.pin.px + 0.5, state.pin.py + 0.5);
+    els.pinMarker.style.left = `${s.x}px`;
+    els.pinMarker.style.top = `${s.y}px`;
+    els.pinMarker.classList.add("on");
+    els.pinData.innerHTML = formatReadout(state.pin, true);
+    requestAnimationFrame(() => drawPinChart(state.pin.monthly, state.pin.tMean));
+  }
+
+  async function loadLayer(layer, { keepView = false } = {}) {
+    state.layer = layer;
+    setStatus(`加载 ${layer.name}…`);
+    els.hoverData.innerHTML = '<div class="empty">加载中…</div>';
+
+    let usedCache = false;
+    if (layer.kind === "temperature" && state.dataReady) {
+      const gray =
+        layer.monthIndex >= 0 ? state.tempMonths[layer.monthIndex] : state.tempAnnual;
+      if (gray) {
+        state.pixels = grayToRGBA(gray);
+        usedCache = true;
+      }
+    }
+
+    if (!usedCache) {
+      const img = await loadImage(layer.src);
+      state.iw = img.naturalWidth;
+      state.ih = img.naturalHeight;
+      const off = document.createElement("canvas");
+      off.width = state.iw;
+      off.height = state.ih;
+      const octx = off.getContext("2d", { willReadFrequently: true });
+      octx.drawImage(img, 0, 0);
+      state.pixels = octx.getImageData(0, 0, state.iw, state.ih).data;
+    }
+
+    state.img = buildDisplayImage();
+    if (!keepView) fitView();
+    draw();
+    updateLegend();
+    updateMonthNav();
+    updatePinUI();
+    const notes = [];
+    if (state.useColorScale && supportsColorScale(layer.kind)) notes.push("色阶");
+    if (state.showCoast) notes.push("描边");
+    if (state.showContours) notes.push("等高线");
+    setStatus(`${layer.name} · ${state.iw}×${state.ih}${notes.length ? " · " + notes.join(" · ") : ""}`);
+  }
+
+  function refreshDisplay() {
+    if (!state.pixels) return;
+    state.img = buildDisplayImage();
+    draw();
+    updateLegend();
+    updateMonthNav();
+    updatePinUI();
+  }
+
+  async function loadGlobalData() {
+    setStatus("加载 Land Mask / 海拔 / 气温数据…");
+    const elevImg = await loadImage(ELEV_URL);
+    const landImg = await loadImage(LAND_MASK_URL);
+    const { gray: elevGray, w, h } = imageToGray(elevImg);
+    const { gray: landGray } = imageToGray(landImg);
+    if (w !== landImg.naturalWidth || h !== landImg.naturalHeight) {
+      throw new Error("海拔与 Land Mask 尺寸不一致");
+    }
+    state.iw = w;
+    state.ih = h;
+    state.elevGray = elevGray;
+    state.land = new Uint8Array(w * h);
+    for (let i = 0; i < landGray.length; i++) state.land[i] = landGray[i] > 127 ? 1 : 0;
+    state.coastOverlay = buildCoastOverlay(state.land, w, h);
+
+    setStatus("加载等高线叠加…");
+    try {
+      const contourImg = await loadImage(CONTOUR_URL);
+      state.contourOverlay = buildContourOverlay(contourImg);
+    } catch (_) {
+      state.contourOverlay = null;
+    }
+
+    // Load all temperature maps (parallel)
+    setStatus("加载气温月图…");
+    const tempImgs = await Promise.all(TEMP_LAYERS.map((t) => loadImage(t.src)));
+    state.tempAnnual = imageToGray(tempImgs[0]).gray;
+    for (let m = 0; m < 12; m++) {
+      state.tempMonths[m] = imageToGray(tempImgs[m + 1]).gray;
+    }
+    state.dataReady = true;
+  }
+
+  // --- events ---
+  els.select.addEventListener("change", () => {
+    const layer = LAYERS.find((l) => l.id === els.select.value);
+    if (layer) loadLayer(layer).catch((e) => setStatus(String(e.message || e), true));
+  });
+
+  els.monthNav.addEventListener("click", (e) => e.stopPropagation());
+  els.monthNav.addEventListener("pointerdown", (e) => e.stopPropagation());
+  els.btnPrevMonth.addEventListener("click", (e) => {
+    e.stopPropagation();
+    shiftMonth(-1).catch((err) => setStatus(String(err.message || err), true));
+  });
+  els.btnNextMonth.addEventListener("click", (e) => {
+    e.stopPropagation();
+    shiftMonth(1).catch((err) => setStatus(String(err.message || err), true));
+  });
+
+  els.legendToggle.addEventListener("change", () => {
+    state.showLegend = els.legendToggle.checked;
+    updateLegend();
+  });
+
+  els.colorScaleToggle.addEventListener("change", () => {
+    state.useColorScale = els.colorScaleToggle.checked;
+    refreshDisplay();
+  });
+
+  els.coastToggle.addEventListener("change", () => {
+    state.showCoast = els.coastToggle.checked;
+    draw();
+  });
+
+  els.contourToggle.addEventListener("change", () => {
+    state.showContours = els.contourToggle.checked;
+    draw();
+  });
+
+  els.btnReset.addEventListener("click", () => {
+    fitView();
+    draw();
+    updatePinUI();
+  });
+
+  els.btnClearPin.addEventListener("click", () => {
+    state.pin = null;
+    updatePinUI();
+  });
+
+  els.viewport.addEventListener("click", (e) => {
+    if (e.button !== 0) return;
+    if (state.didPan) { state.didPan = false; return; }
+    const { x, y } = screenToImage(e.clientX, e.clientY);
+    const sample = readAt(x, y);
+    if (!sample) return;
+    state.pin = sample;
+    updatePinUI();
+  });
+
+  function beginPan(e) {
+    state.panning = true;
+    state.didPan = false;
+    els.viewport.classList.add("panning");
+    state.panOrigin = { x: e.clientX, y: e.clientY, tx: state.tx, ty: state.ty };
+    els.viewport.setPointerCapture(e.pointerId);
+  }
+
+  els.viewport.addEventListener("pointerdown", (e) => {
+    if (e.button === 1 || e.button === 2 || (e.button === 0 && e.shiftKey)) {
+      e.preventDefault();
+      beginPan(e);
+    }
+  });
+
+  els.viewport.addEventListener("pointermove", (e) => {
+    if (state.panning && state.panOrigin) {
+      const dx = e.clientX - state.panOrigin.x;
+      const dy = e.clientY - state.panOrigin.y;
+      if (Math.abs(dx) + Math.abs(dy) > 3) state.didPan = true;
+      state.tx = state.panOrigin.tx + dx;
+      state.ty = state.panOrigin.ty + dy;
+      draw();
+      updatePinUI();
+      return;
+    }
+    const { x, y } = screenToImage(e.clientX, e.clientY);
+    updateHoverUI(readAt(x, y), e.clientX, e.clientY);
+  });
+
+  els.viewport.addEventListener("pointerup", () => {
+    if (state.panning) {
+      state.panning = false;
+      els.viewport.classList.remove("panning");
+      state.panOrigin = null;
+    }
+  });
+
+  els.viewport.addEventListener("pointerleave", () => {
+    if (state.panning) return;
+    state.hover = null;
+    els.crosshair.classList.remove("on");
+    els.hoverData.innerHTML = '<div class="empty">将鼠标移到地图上</div>';
+  });
+
+  els.viewport.addEventListener("contextmenu", (e) => e.preventDefault());
+
+  els.viewport.addEventListener("wheel", (e) => {
+    e.preventDefault();
+    if (!state.img) return;
+    const rect = els.viewport.getBoundingClientRect();
+    const mx = e.clientX - rect.left;
+    const my = e.clientY - rect.top;
+    const before = screenToImageRaw(e.clientX, e.clientY);
+    state.scale = Math.min(64, Math.max(0.05, state.scale * Math.exp(-e.deltaY * 0.0015)));
+    state.tx = mx - before.x * state.scale;
+    state.ty = my - before.y * state.scale;
+    draw();
+    updatePinUI();
+    updateHoverUI(readAt(wrapX(before.x), before.y), e.clientX, e.clientY);
+  }, { passive: false });
+
+  window.addEventListener("resize", () => {
+    resizeCanvas();
+    updatePinUI();
+  });
+
+  async function init() {
+    fillSelect();
+    try {
+      const res = await fetch(TEMP_META_URL);
+      if (res.ok) {
+        const meta = await res.json();
+        if (meta.gray_scale_C) state.tempMeta.gray_scale_C = meta.gray_scale_C;
+        if (meta.max_elev_m) state.tempMeta.max_elev_m = meta.max_elev_m;
+        if (meta.freeze_C != null) state.tempMeta.freeze_C = meta.freeze_C;
+      }
+    } catch (_) { /* defaults */ }
+    syncChartAxisFromMeta();
+
+    resizeCanvas();
+    await loadGlobalData();
+    updateLegend();
+    await loadLayer(state.layer);
+    setStatus(`${state.layer.name} · ${state.iw}×${state.ih} · 数据就绪`);
+  }
+
+  init().catch((e) => setStatus(String(e.message || e), true));
+})();
+  </script>
+</body>
+</html>
