@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Summarize temperature / terrain statistics for magdyn."""
+"""Summarize temperature / terrain statistics for IMagDyn."""
 from __future__ import annotations
 
 import json
@@ -229,7 +229,7 @@ def main() -> None:
         out.write_text(json.dumps(stats, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
     # Pretty print
-    print("=== Magdyn climate / terrain stats ===")
+    print("=== IMagDyn climate / terrain stats ===")
     print(f"Grid {w}×{h}  land {stats['grid']['land_pct']:.1f}%")
     print()
     print("Terrain (viewer decode)")

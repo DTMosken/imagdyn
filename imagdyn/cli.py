@@ -1,4 +1,4 @@
-"""Command-line interface: python -m magdyn <cmd> …"""
+"""Command-line interface: python -m imagdyn <cmd> …"""
 
 from __future__ import annotations
 
@@ -33,7 +33,7 @@ def _cmd_reshape(_: argparse.Namespace) -> int:
         from .reshape import main as reshape_main
     except ImportError:
         print(
-            "reshape is local-only (magdyn/reshape.py missing). "
+            "reshape is local-only (imagdyn/reshape.py missing). "
             "It is gitignored and not part of the shared menu.",
             file=sys.stderr,
         )
@@ -85,6 +85,9 @@ def _cmd_summarize(_: argparse.Namespace) -> int:
 
 
 def _cmd_viewer(args: argparse.Namespace) -> int:
+    import atexit
+    import signal
+
     from . import paths
     from .assets import ensure_derived_terrain, write_assets_json
 
@@ -102,22 +105,92 @@ def _cmd_viewer(args: argparse.Namespace) -> int:
             if args.verbose:
                 super().log_message(fmt, *log_args)
 
-    # Allow reuse for quick restart
-    socketserver.TCPServer.allow_reuse_address = True
-    httpd = socketserver.ThreadingTCPServer(("127.0.0.1", port), Handler)
+    class ViewerServer(socketserver.ThreadingTCPServer):
+        allow_reuse_address = True
+        daemon_threads = True
+
+    httpd = ViewerServer(("127.0.0.1", port), Handler)
     url = f"http://127.0.0.1:{port}/viewer/"
     print(f"Serving {root}")
     print(f"Viewer: {url}")
+
+    released = False
+    release_lock = threading.Lock()
+
+    def release_port() -> None:
+        """Stop accept loop and close the listening socket (idempotent)."""
+        nonlocal released
+        with release_lock:
+            if released:
+                return
+            released = True
+        try:
+            httpd.shutdown()
+        except Exception:
+            pass
+        try:
+            httpd.server_close()
+        except Exception:
+            pass
+
+    atexit.register(release_port)
+
+    def _on_signal(signum, frame) -> None:  # noqa: ARG001
+        # shutdown() must not run on the serve_forever thread
+        threading.Thread(target=release_port, daemon=True).start()
+
+    prev_handlers: dict[int, object] = {}
+    for sig in (
+        signal.SIGINT,
+        getattr(signal, "SIGTERM", None),
+        getattr(signal, "SIGBREAK", None),
+    ):
+        if sig is None:
+            continue
+        try:
+            prev_handlers[sig] = signal.signal(sig, _on_signal)
+        except (ValueError, OSError):
+            pass
+
+    # Windows: console close / logoff — free the port before the process dies
+    win_handler = None
+    if sys.platform == "win32":
+        import ctypes
+
+        HandlerRoutine = ctypes.WINFUNCTYPE(ctypes.c_int, ctypes.c_uint)
+
+        def _console_ctrl(ctrl_type: int) -> int:
+            # 0=C, 1=Break, 2=Close, 5=Logoff, 6=Shutdown
+            if ctrl_type in (0, 1, 2, 5, 6):
+                release_port()
+                return 1
+            return 0
+
+        win_handler = HandlerRoutine(_console_ctrl)
+        ctypes.windll.kernel32.SetConsoleCtrlHandler(win_handler, True)
 
     if not args.no_open:
         threading.Timer(0.4, lambda: webbrowser.open(url)).start()
 
     try:
-        httpd.serve_forever()
-    except KeyboardInterrupt:
-        print("\nStopped.")
+        httpd.serve_forever(poll_interval=0.5)
     finally:
-        httpd.server_close()
+        release_port()
+        for sig, handler in prev_handlers.items():
+            try:
+                signal.signal(sig, handler)  # type: ignore[arg-type]
+            except (ValueError, OSError):
+                pass
+        if win_handler is not None:
+            try:
+                ctypes.windll.kernel32.SetConsoleCtrlHandler(win_handler, False)
+            except Exception:
+                pass
+        try:
+            atexit.unregister(release_port)
+        except Exception:
+            pass
+        print("\nStopped.")
     return 0
 
 
@@ -135,7 +208,7 @@ def _cmd_pipeline(args: argparse.Namespace) -> int:
             from .reshape import main as reshape_main
         except ImportError:
             print(
-                "pipeline --reshape skipped: magdyn/reshape.py not present (local-only).",
+                "pipeline --reshape skipped: imagdyn/reshape.py not present (local-only).",
                 file=sys.stderr,
             )
         else:
@@ -193,8 +266,8 @@ def _cmd_pipeline(args: argparse.Namespace) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        prog="magdyn",
-        description="magdyn — terrain / climate map tooling",
+        prog="imagdyn",
+        description="IMagDyn — terrain / climate map tooling",
     )
     p.add_argument(
         "--lang",
@@ -221,7 +294,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = sub.add_parser(
         "reshape",
-        help="[local-only] Nonlinear remap + filters (requires magdyn/reshape.py)",
+        help="[local-only] Nonlinear remap + filters (requires imagdyn/reshape.py)",
     )
     sp.set_defaults(func=_cmd_reshape)
 

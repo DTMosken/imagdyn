@@ -170,6 +170,6 @@ def print_status(status: AssetStatus | None = None) -> None:
         ("Temperature meta", st.temperature_meta),
         (f"Temperature months ({sum(months)}/12)", all(months)),
     ]
-    print("=== magdyn assets ===")
+    print("=== IMagDyn assets ===")
     for name, ok in rows:
         print(f"  [{'OK' if ok else '--'}] {name}")

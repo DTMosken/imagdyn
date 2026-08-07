@@ -26,10 +26,13 @@ graphs/Terrain - Contours.png
 graphs/assets.json
 graphs/bench_cpu_gpu.json
 # Local-only terrain remapping (not shipped)
-magdyn/reshape.py
+imagdyn/reshape.py
 reshape_terrain.py
+.imagdyn_lang
+.imagdyn_env
 .magdyn_lang
 .magdyn_env
 __pycache__/
 **/__pycache__/
 *.py[cod]
+imagdyn/bench_cpu_gpu.py

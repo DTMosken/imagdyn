@@ -1,4 +1,4 @@
-"""Interactive bilingual menu for magdyn."""
+"""Interactive bilingual menu for IMagDyn."""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ from . import paths
 from .envutil import (
     current_conda_env,
     current_python,
+    find_conda,
     format_missing_dep,
     list_conda_envs,
     load_preferred_env,
@@ -18,11 +19,11 @@ from .envutil import (
     save_preferred_env,
 )
 
-_LANG_FILE = paths.ROOT / ".magdyn_lang"
+_LANG_FILE = paths.ROOT / ".imagdyn_lang"
 
 TEXTS = {
     "zh": {
-        "title": "magdyn 交互菜单",
+        "title": "IMagDyn 交互菜单",
         "pick_lang": "选择语言 / Choose language",
         "lang_zh": "中文",
         "lang_en": "English",
@@ -58,12 +59,13 @@ TEXTS = {
         "env_list": "可用 conda 环境",
         "env_prompt": "输入要切换的 conda 环境名（留空取消；- 清除首选）: ",
         "env_none": "(无)",
-        "env_relaunch": "将用该环境重新启动 magdyn…",
+        "env_relaunch": "将用该环境重新启动 IMagDyn…",
         "env_no_conda": "未找到 conda，请在终端手动: conda activate <环境名>",
+        "env_conda_bin": "conda 路径",
         "yn_yes": ("y", "Y", "是", "是的"),
     },
     "en": {
-        "title": "magdyn interactive menu",
+        "title": "IMagDyn interactive menu",
         "pick_lang": "Choose language / 选择语言",
         "lang_zh": "中文",
         "lang_en": "English",
@@ -99,8 +101,9 @@ TEXTS = {
         "env_list": "Available conda envs",
         "env_prompt": "Conda env to switch to (empty=cancel; -=clear preferred): ",
         "env_none": "(none)",
-        "env_relaunch": "Relaunching magdyn in that environment…",
+        "env_relaunch": "Relaunching IMagDyn in that environment…",
         "env_no_conda": "conda not found. In a terminal: conda activate <env_name>",
+        "env_conda_bin": "conda path",
         "yn_yes": ("y", "Y", "yes", "YES"),
     },
 }
@@ -111,11 +114,14 @@ def _clear() -> None:
 
 
 def _load_lang() -> str | None:
-    try:
-        lang = _LANG_FILE.read_text(encoding="utf-8").strip().lower()
-    except OSError:
-        return None
-    return lang if lang in TEXTS else None
+    for path in (_LANG_FILE, paths.ROOT / ".magdyn_lang"):
+        try:
+            lang = path.read_text(encoding="utf-8").strip().lower()
+        except OSError:
+            continue
+        if lang in TEXTS:
+            return lang
+    return None
 
 
 def _save_lang(lang: str) -> None:
@@ -158,7 +164,7 @@ def _run_argv(argv: list[str], lang: str) -> int:
 
     t = TEXTS[lang]
     print()
-    print(f">>> {t['run']}: python -m magdyn {' '.join(argv)}")
+    print(f">>> {t['run']}: python -m imagdyn {' '.join(argv)}")
     print()
     try:
         ec = int(cli.main(argv))
@@ -185,10 +191,10 @@ def _run_argv(argv: list[str], lang: str) -> int:
             cur = current_conda_env() or TEXTS[lang]["env_none"]
             if lang == "zh":
                 print(f"  当前环境: {cur}")
-                print("  可在终端 conda activate <环境> 后重新运行 magdyn.cmd")
+                print("  可在终端 conda activate <环境> 后重新运行 IMagDyn.cmd")
             else:
                 print(f"  Active env: {cur}")
-                print("  Activate another env in your terminal, then re-run magdyn.")
+                print("  Activate another env in your terminal, then re-run IMagDyn.")
         return 1
     print()
     print(t["done"] if ec == 0 else t["fail"].format(ec=ec))
@@ -211,6 +217,8 @@ def _env_menu(lang: str) -> str | None:
     print(f"  {t['env_active']}: {current_conda_env() or t['env_none']}")
     pref = load_preferred_env()
     print(f"  {t['env_preferred']}: {pref or t['env_none']}")
+    conda_bin = find_conda()
+    print(f"  {t['env_conda_bin']}: {conda_bin or t['env_none']}")
     envs = list_conda_envs()
     if envs:
         print(f"  {t['env_list']}: {', '.join(envs)}")
@@ -222,6 +230,9 @@ def _env_menu(lang: str) -> str | None:
         return None
     if name == "-":
         save_preferred_env(None)
+        return None
+    if not conda_bin:
+        print(t["env_no_conda"])
         return None
     save_preferred_env(name)
     print(t["env_relaunch"])

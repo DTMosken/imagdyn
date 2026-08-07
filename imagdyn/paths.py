@@ -1,10 +1,10 @@
-"""Path constants for the magdyn project."""
+"""Path constants for the IMagDyn project."""
 
 from __future__ import annotations
 
 from pathlib import Path
 
-# Package lives at <repo>/magdyn/; project root is parent.
+# Package lives at <repo>/imagdyn/; project root is parent.
 ROOT = Path(__file__).resolve().parent.parent
 GRAPHS = ROOT / "graphs"
 TEMP_DIR = GRAPHS / "temperature"

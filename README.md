@@ -1,55 +1,86 @@
-# magdyn
+# IMagDyn
 
-虚构世界气候 / 地形工具集：从灰度海拔图生成温度图与等高线，并在浏览器中交互查看。
+自定义地图的**交互式地图与气候工具**：从灰度海拔生成海陆遮罩、等高线与月/年均气温，并在浏览器中查看。
+
+| | |
+|--|--|
+| 显示名 | **IMagDyn** |
+| Python 包 | `imagdyn` |
+| 入口 | `IMagDyn.cmd`（Windows）· `IMagDyn.sh`（Unix） |
+
+---
 
 ## 快速开始
 
-**无参数**打开交互菜单；**有参数**则直接执行命令。
+**无参数**打开交互菜单；**有参数**则直接跑命令。
 
 ```bash
-# Windows
-magdyn.cmd
+# Windows（可双击）
+IMagDyn.cmd
 
 # Linux / macOS / Git Bash
-./magdyn.sh
+./IMagDyn.sh
 ```
 
-菜单项：`status` · `ensure` · `contours` · `temperature` · `summarize` · **`viewer`** · `pipeline` · **环境** · 切换语言
-
-- 缺依赖时**不退出菜单**，显示报错，并提示在终端 `conda activate` 后重开；也可在「环境」里设置首选 conda 环境（写入 `.magdyn_env`，下次用 `conda run` 启动）。
-- 气温菜单不再询问 downsample。
-
-启动时可选 **中文 / English**（记住到 `.magdyn_lang`）。也可：
+推荐在已装好依赖的 conda 环境中使用（例如 `tf-gpu`）。可在菜单「环境」里设置首选环境（写入 `.imagdyn_env`）；下次启动会用 `conda run` 进入该环境。
 
 ```bash
-magdyn.cmd --lang zh
-./magdyn.sh --lang en
-python -m magdyn menu --lang zh
+IMagDyn.cmd --lang zh
+./IMagDyn.sh --lang en
+python -m imagdyn menu --lang zh
 ```
 
-直接执行（跳过菜单）：
+直接命令示例：
 
 ```bash
-magdyn.cmd status
-./magdyn.sh ensure
-python -m magdyn viewer --port 8765
-python -m magdyn temperature -- --cpu
+IMagDyn.cmd status
+./IMagDyn.sh ensure
+python -m imagdyn viewer --port 8765
+python -m imagdyn temperature -- --cpu
+python -m imagdyn pipeline --temperature
 ```
 
-也可用 `viewer.bat` 直接启动查看器。
+也可用 `viewer.bat` 只开地图查看器。旧名 `magdyn.cmd` / `magdyn.sh` 仍会转发到新入口。
+
+---
+
+## 交互菜单
+
+| 键 | 功能 |
+|----|------|
+| 1 | `status` — 资源是否齐全，写 `graphs/assets.json` |
+| 2 | `ensure` — 从全海拔派生 Land Mask / Above / Below（可从 `graphs/template/` 播种） |
+| 3 | `contours` — 陆地等高线 |
+| 4 | `temperature` — 12 月 + 年均气温（可问是否强制 CPU） |
+| 5 | `summarize` — 气候 / 地形统计 |
+| 6 | `viewer` — 本地 HTTP 查看器 |
+| 7 | `pipeline` — 一键流水线 |
+| 8 | **环境** — 查看 Python / conda，设置首选环境并重启 |
+| 9 | 切换中文 / English（存到 `.imagdyn_lang`） |
+| 0 | 退出 |
+
+行为要点：
+
+- 缺依赖时**不退出菜单**，打印报错，并提示 `conda activate` 或走「环境」切换。
+- 气温交互**不再询问 downsample**。
+- Windows 双击启动时，菜单退出或出错后会 `pause`，避免闪退。
+
+---
 
 ## 数据约定
 
 ### 全海拔 `graphs/Terrain - Full Elevation.png`
 
-单通道灰度，`0.5`（约 gray 128）= 海平面：
+单通道灰度，**0.5**（约 gray 128）= 海平面：
 
 | 区间 | 含义 |
 |------|------|
-| `> 0.5` | 陆地；线性映射到 `0 … max_elev_m`（默认 **8000 m**） |
-| `< 0.5` | 海洋；线性映射到 `0 … min_elev_m`（默认 **-8000 m**） |
+| `> 0.5` | 陆地 → 线性 `0 … max_elev_m`（默认 **+8000 m**） |
+| `< 0.5` | 海洋 → 线性 `0 … min_elev_m`（默认 **−8000 m**） |
 
-海陆优先用 `Terrain - Land Mask.png`（白 = 陆）。缺失时 `ensure` / viewer 从全海拔推导（`> 0.5` = 陆）。
+海陆优先读 `Terrain - Land Mask.png`（白 = 陆）。没有遮罩时，`ensure` / viewer 用海拔 `> 0.5` 推导。
+
+本地大图（Full / Above / Below / Land Mask / Satellite）；有一个示例全海拔图（现实地球）在 `graphs/template/` 可选择跑 `2 ensure` 播种。
 
 ### 气温 `graphs/temperature/*.png`
 
@@ -57,79 +88,106 @@ python -m magdyn temperature -- --cpu
 gray = clip((T_C − T_MIN) / (T_MAX − T_MIN) × 255)
 ```
 
-默认 `T_MIN = −60 °C`，`T_MAX = +45 °C`。另有 `temperature_meta.json`、`temperature_stats.json`。
+默认 `T_MIN = −60 °C`，`T_MAX = +45 °C`。同目录还有 `temperature_meta.json`、`temperature_stats.json`。
+
+沿海海洋缓冲使用基于PyTorch的 **GPU 热扩散**（对开放洋面 mask 做多次可分离均值滤波）。相关参数：`--maritime-efold-km`、`--maritime-diffuse-passes` 等（见 `python -m imagdyn temperature -- --help`）。
+
+---
 
 ## 推荐流水线
 
 ```text
-ensure → contours → temperature → summarize
+ensure → contours → temperature → summarize → viewer
 ```
-
-或：
 
 ```bash
-./magdyn.sh pipeline --temperature
+./IMagDyn.sh pipeline --temperature
+# 或强制重建派生地形：
+./IMagDyn.sh pipeline --force --temperature
 ```
 
-| 步骤 | 说明 |
+| 命令 | 说明 |
 |------|------|
-| `status` | 列出资源是否存在，并写 `graphs/assets.json` |
-| `ensure` | 仅有全海拔时生成 Land Mask、Above/Below；可从 `graphs/template/` 播种 |
-| `contours` | 陆地等高线（次级 200 m，主等高线 1000 m） |
-| `temperature` | 12 月 + 年均气温（PyTorch，优先 CUDA；可用 `--cpu`、`--downsample`） |
-| `summarize` | 打印摘要并写 `temperature_stats.json` |
-| `viewer` | 本地 HTTP + 打开查看器（启动前自动 `ensure`） |
-| `pipeline` | `ensure` → `contours`；可选 `--temperature` / `--force` |
+| `status` | 列出资源并写 `assets.json` |
+| `ensure` | 派生遮罩 / Above / Below；`--force` 强制重建 |
+| `contours` | 次级 200 m、主等高线 1000 m |
+| `temperature` | PyTorch，优先 CUDA；`--cpu`、`--downsample N` |
+| `summarize` | 终端摘要 + `temperature_stats.json` |
+| `viewer` | `http://127.0.0.1:8765/viewer/`（先 `ensure`） |
+| `pipeline` | `ensure` → `contours`；可选 `--temperature` |
+| `reshape` | **仅本地**：需存在 `imagdyn/reshape.py` |
 
-气温常用参数见 `python -m magdyn temperature -- --help`（如 `--coast-blend-km`、`--heat-transport`、`--ocean-sst-nudge`）。
+气温子命令若要把参数传给生成器，在 `--` 之后写，例如：
 
-## 目录
+```bash
+python -m imagdyn temperature -- --cpu --maritime-iters 2
+```
+
+---
+
+## 目录结构
 
 ```text
-magdyn/
-├── magdyn.cmd / magdyn.sh   # 交互菜单 / CLI 入口
-├── viewer.bat               # 快捷打开 viewer
-├── magdyn/                  # Python 包
+IMagDyn/   (仓库根目录)
+├── IMagDyn.cmd / IMagDyn.sh   # 主入口
+├── magdyn.cmd / magdyn.sh     # 兼容转发
+├── viewer.bat
+├── imagdyn/                   # Python 包
 │   ├── cli.py
+│   ├── interactive.py         # 双语菜单
+│   ├── envutil.py             # conda 探测 / 首选环境
 │   ├── assets.py
 │   ├── contours.py
-│   ├── temperature.py
-│   └── summarize.py
+│   ├── temperature.py         # 气温 + GPU 扩散缓冲
+│   ├── summarize.py
+│   ├── timing.py
+│   └── reshape.py             # 可选，本地-only
 ├── viewer/index.html
 └── graphs/
     ├── assets.json
-    ├── template/            # 可选：种子 Full Elevation
+    ├── template/              # 可选种子 Full Elevation
     ├── Terrain - *.png
-    ├── Satellite Color.png  # 可选
+    ├── Satellite Color.png    # 可选
     └── temperature/
 ```
 
-兼容旧脚本名（`generate_temperature.py` 等）为指向包内模块的薄封装。
+配置文件（本地）：
 
-本地可选：`magdyn/reshape.py`（海拔非线性重映射，**已 gitignore**，不出现在交互菜单；有文件时可 `python -m magdyn reshape`）。
+| 文件 | 用途 |
+|------|------|
+| `.imagdyn_env` | 首选 conda 环境名 |
+| `.imagdyn_lang` | `zh` / `en` |
+
+仍可读旧的 `.magdyn_env` / `.magdyn_lang`。
+
+---
 
 ## Viewer
 
 ```bash
-./magdyn.sh viewer
+./IMagDyn.sh viewer
 # → http://127.0.0.1:8765/viewer/
 ```
 
-- **图层**：无卫星图则不显示；气温层按实际文件加载
-- **图例**：常显；色阶 / 陆地描边 / 等高线 / **经纬度** 可切换
-- **经纬网**：30° 网格；赤道、回归线（±23.5°）、极圈（±66.5°）加粗；本初子午线略强调
-- **读数**：悬停与钉点（经纬、海陆、海拔/水深、气温）；钉点可看全年气温曲线
-- **资源**：优先读 `graphs/assets.json`，否则逐文件探测
+- **图层**：缺卫星图则隐藏该项；气温按实际文件加载  
+- **图例**：常显；色阶 / 陆地描边 / 等高线 / **经纬网** 可开关  
+- **经纬网**：30° 网格；赤道、回归线（±23.5°）、极圈（±66.5°）
+- **等高线**：次级等高线200m，主等高线 1000 m（加粗）
+- **读数**：悬停与钉点（经纬、海陆、海拔或水深、气温）；钉点可看全年气温曲线  
+- **资源**：优先 `graphs/assets.json`，否则逐文件探测  
 
-海拔色阶：≤0 浅蓝，>0 至少浅绿，约 1 / 1.5 / 2 / 3 km 处分色。解码与 README 一致：陆地 `0…+max_elev_m`，海洋 `0…min_elev_m`（默认 ±8000 m，线性）。
+
+
+---
 
 ## 依赖
 
-- Python 3.10+
-- `numpy`、`Pillow`、`scipy`
-- 气温：`torch`（有 CUDA 更快；`--cpu` 可强制 CPU）
+- Python **3.10+**
+- 通用：`numpy`、`Pillow`、`scipy`（`summarize` 海岸采样等）
+- 气温：`torch`（使用 CUDA 显卡加速；`--cpu` 可强制 CPU）
+
+---
 
 ## 备注
 
-- 改地形后请重跑 `temperature`，否则气温层与新海拔可能不一致。
-- `.gitignore` 可能忽略大图与温度产物；可将种子全海拔放在 `graphs/template/` 后执行 `ensure`。
+- 改地形后请重跑 `temperature`（及需要时 `summarize`），否则气温层可能与新海拔不一致。  

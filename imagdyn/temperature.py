@@ -11,6 +11,8 @@ Drivers
 - Distance to *open* ocean + nearby open-ocean area (maritime moderation)
   Water with that month's temperature at or below 0 C does not provide
   maritime influence for that month
+- Coastal buffering via GPU heat-diffusion (repeated separable mean filters)
+  rather than Euclidean distance transform (EDT)
 
 Uses PyTorch CUDA when available (conda env tf-gpu).
 
@@ -20,7 +22,7 @@ default T_MIN=-60 C, T_MAX=+45 C.
 
 Usage::
 
-    python generate_temperature.py
+    python -m imagdyn temperature
 """
 
 from __future__ import annotations
@@ -33,7 +35,6 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from PIL import Image
-from scipy import ndimage
 
 from .timing import StepTimer, format_duration
 
@@ -165,35 +166,6 @@ def box_filter_wrap_lon(field: torch.Tensor, ry: int, rx: int) -> torch.Tensor:
     return x[0, 0]
 
 
-def open_water_distance_km(
-    open_water_np: np.ndarray,
-    lat_np: np.ndarray,
-    planet_radius_km: float,
-    max_dist_km: float = 2000.0,
-) -> np.ndarray:
-    """
-    Distance (km) to nearest open-water pixel. Longitude wraps.
-    open_water_np: bool (H,W)
-
-    Pads only enough for max_dist_km (full half-width pad is too costly at 8k).
-    """
-    h, w = open_water_np.shape
-    km_per_deg = (np.pi * planet_radius_km) / 180.0
-    dy_km = (180.0 / h) * km_per_deg
-    dx_eq = (360.0 / w) * km_per_deg
-
-    if not open_water_np.any():
-        return np.full((h, w), 1.0e6, dtype=np.float32)
-
-    pad = min(w // 2, max(32, int(np.ceil(max_dist_km / max(dx_eq, 1e-6))) + 2))
-    ow_pad = np.pad(open_water_np, ((0, 0), (pad, pad)), mode="wrap")
-    dist_pad = ndimage.distance_transform_edt(~ow_pad, sampling=(dy_km, dx_eq))
-    dist_km = dist_pad[:, pad : pad + w].astype(np.float32)
-    cos_abs = np.abs(np.cos(np.deg2rad(lat_np))).astype(np.float32)
-    dist_km *= np.sqrt(0.35 + 0.65 * cos_abs)[:, None]
-    return np.minimum(dist_km, np.float32(max_dist_km * 1.5))
-
-
 def kernel_radius_px(
     height: int,
     width: int,
@@ -208,6 +180,48 @@ def kernel_radius_px(
     return ry, rx
 
 
+def diffuse_ocean_influence(
+    open_water: torch.Tensor,
+    lat: torch.Tensor,
+    *,
+    planet_radius_km: float,
+    length_km: float,
+    passes: int = 6,
+) -> torch.Tensor:
+    """
+    Heat-diffusion coastal buffer on GPU.
+
+    Starts from an open-water mask (1=source, 0=land/ice) and applies repeated
+    separable mean filters (≈ Gaussian / thermal diffusion). On land this
+    yields a smooth 1→0 ocean-influence field — physically closer to heat /
+    moisture dissipation than a hard Euclidean distance falloff.
+    """
+    h, w = open_water.shape
+    x = open_water.clamp(0.0, 1.0)
+    n = max(1, int(passes))
+    # n box filters of half-width R ≈ Gaussian with σ ≈ R*sqrt(n/3).
+    # Choose R so the RMS spread matches length_km on this grid.
+    r_km = max(float(length_km) * (3.0 / float(n)) ** 0.5, 20.0)
+    # Mild high-latitude compression of E–W mixing (narrower longitude km/px)
+    cos_lat = torch.cos(torch.deg2rad(lat)).abs().clamp(0.25, 1.0)
+    lat_scale = float(cos_lat.mean().item())
+
+    for _ in range(n):
+        ry, rx = kernel_radius_px(h, w, r_km, planet_radius_km)
+        rx = max(1, int(round(rx * lat_scale)))
+        # Cap extreme kernels on tiny test grids / memory; multi-pass still spreads
+        ry = min(max(ry, 1), max(3, h // 4))
+        rx = min(max(rx, 1), max(3, w // 4))
+        x = box_filter_wrap_lon(x, ry, rx)
+    return x.clamp(0.0, 1.0)
+
+
+def influence_to_dist_km(influence: torch.Tensor, efold_km: float) -> torch.Tensor:
+    """Map diffusion weight ≈ exp(-d/L) back to a pseudo-distance for callers."""
+    L = max(float(efold_km), 1.0)
+    return (-L * torch.log(influence.clamp(min=1e-6, max=1.0))).clamp(0.0, L * 12.0)
+
+
 def maritime_from_open_water(
     open_water: torch.Tensor,
     lat: torch.Tensor,
@@ -216,32 +230,35 @@ def maritime_from_open_water(
     neighbor_radius_km: float,
     maritime_e_fold_km: float,
     land: torch.Tensor,
+    diffuse_passes: int = 6,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
-    Maritime weight from open (unfrozen) water only.
-    Returns (maritime, dist_km, near_open).
+    Maritime weight from open (unfrozen) water only — GPU diffusion, no EDT.
+
+    Returns (maritime, dist_km_pseudo, near_open).
+    ``dist_km_pseudo`` is inverted from the diffusion field so coastal blend
+    code that expects an e-folding distance keeps working.
     """
     h, w = open_water.shape
-    device = open_water.device
     ry, rx = kernel_radius_px(h, w, neighbor_radius_km, planet_radius_km)
 
-    # Nearby open-water fraction (GPU conv); soft weights allowed
+    # Local open-water fraction (short-range neighborhood)
     near = box_filter_wrap_lon(open_water, ry, rx).clamp(0.0, 1.0)
 
-    # Distance on CPU via scipy EDT (binary open water)
-    ow_bin = (open_water > 0.5).detach().cpu().numpy().astype(bool)
-    lat_np = lat.detach().cpu().numpy()
-    max_dist = max(2000.0, maritime_e_fold_km * 8.0, neighbor_radius_km * 4.0)
-    dist_np = open_water_distance_km(
-        ow_bin, lat_np, planet_radius_km, max_dist_km=max_dist
+    # Long-range coastal buffer via repeated mean filters (heat diffusion)
+    # Reach several e-folds so continental interiors can still feel weak maritime
+    ocean_inf = diffuse_ocean_influence(
+        open_water,
+        lat,
+        planet_radius_km=planet_radius_km,
+        length_km=max(maritime_e_fold_km * 3.0, neighbor_radius_km),
+        passes=diffuse_passes,
     )
-    dist_km = torch.from_numpy(dist_np).to(device=device, dtype=torch.float32)
 
-    dist_term = torch.exp(-dist_km / max(maritime_e_fold_km, 1.0))
-    maritime = (0.55 * near + 0.45 * dist_term).clamp(0.0, 1.0)
+    maritime = (0.55 * near + 0.45 * ocean_inf).clamp(0.0, 1.0)
+    dist_km = influence_to_dist_km(ocean_inf, maritime_e_fold_km)
 
-    # Over open water itself: strong maritime; over frozen water / land: from proximity
-    # Local open-water presence scales maritime on water cells (ice ~ land-like)
+    # Over open water itself: strong maritime; frozen water / land: from proximity
     maritime = torch.where(
         land,
         maritime,
@@ -366,12 +383,14 @@ def synthesize_temperatures(
     coast_ocean_pull: float = 0.45,
     ocean_sst_nudge: float = 0.55,
     maritime_iters: int = 2,
+    maritime_diffuse_passes: int = 6,
 ) -> tuple[np.ndarray, np.ndarray, dict]:
     """
     Returns monthly (12,H,W) float32 C, annual (H,W) float32 C, meta dict.
 
     Open-ocean maritime influence is monthly: water with that month's
     temperature <= freeze_C does not count as open ocean for that month.
+    Coastal buffering uses GPU diffusion (no EDT).
     """
     job_timer = StepTimer("synthesize")
     elev = torch.from_numpy(elev01).to(device=device, dtype=torch.float32)
@@ -436,6 +455,7 @@ def synthesize_temperatures(
                 neighbor_radius_km=neighbor_radius_km,
                 maritime_e_fold_km=maritime_e_fold_km,
                 land=land,
+                diffuse_passes=maritime_diffuse_passes,
             )
             if m == 5:
                 dist_km_ref = dist_km
@@ -546,6 +566,8 @@ def synthesize_temperatures(
         "ocean_mix_km": ocean_mix_km,
         "ocean_sst_nudge": ocean_sst_nudge,
         "maritime_iters": maritime_iters,
+        "maritime_model": "gpu_diffusion",
+        "maritime_diffuse_passes": maritime_diffuse_passes,
         "timing": timing,
     }
 
@@ -610,6 +632,12 @@ def parse_args() -> argparse.Namespace:
         help="Softness (C) of open-water freeze transition",
     )
     p.add_argument("--maritime-iters", type=int, default=2)
+    p.add_argument(
+        "--maritime-diffuse-passes",
+        type=int,
+        default=6,
+        help="Repeated GPU mean-filter passes for coastal ocean-influence diffusion (replaces EDT)",
+    )
     p.add_argument("--ocean-inertia", type=float, default=0.90)
     p.add_argument("--land-inertia", type=float, default=0.28)
     p.add_argument("--continentality-amp", type=float, default=1.2)
@@ -701,6 +729,7 @@ def main() -> None:
             coast_ocean_pull=args.coast_ocean_pull,
             ocean_sst_nudge=args.ocean_sst_nudge,
             maritime_iters=args.maritime_iters,
+            maritime_diffuse_passes=args.maritime_diffuse_passes,
         )
 
     out = args.out_dir
