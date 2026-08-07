@@ -1,0 +1,56 @@
+IMagDyn — licensing notice
+==========================
+
+Copyright (C) 2026 DTMosken
+
+This project uses two licenses depending on the kind of material.
+
+
+1. Source code — GNU GPLv3
+--------------------------
+
+All program source code and accompanying scripts in this repository
+(including but not limited to Python packages under `imagdyn/`, shell /
+batch entry points, and the viewer front-end under `viewer/`) are free
+software licensed under the GNU General Public License version 3.
+
+See the file `LICENSE` for the full GPLv3 text.
+SPDX: GPL-3.0-only
+https://www.gnu.org/licenses/gpl-3.0.html
+
+
+2. Generated outputs — CC BY-SA 4.0
+----------------------------------
+
+Files produced by running IMagDyn — including but not limited to JSON,
+plain text, and images (for example under `graphs/`, such as derived
+terrain masks, contours, temperature maps, `assets.json`,
+`temperature_meta.json`, and `temperature_stats.json`) — are licensed
+under the Creative Commons Attribution-ShareAlike 4.0 International
+license (CC BY-SA 4.0).
+
+See the file `LICENSE.CC-BY-SA-4.0` for the full license text.
+SPDX: CC-BY-SA-4.0
+https://creativecommons.org/licenses/by-sa/4.0/
+
+When you redistribute or adapt those outputs, you must give appropriate
+credit, indicate if changes were made, and share adaptations under
+CC BY-SA 4.0 (or a compatible license) as required by that license.
+
+
+3. Third-party and user inputs
+------------------------------
+
+If you feed IMagDyn with maps or data that you do not own, or that are
+already under another license, you remain responsible for complying with
+those terms. Rights in such inputs are not granted by this NOTICE.
+Outputs that incorporate third-party material may be subject to those
+upstream licenses in addition to CC BY-SA 4.0.
+
+
+中文摘要
+--------
+
+- **源代码**（Python、脚本、`viewer/` 等）：以 **GNU GPLv3** 授权，全文见 `LICENSE`。
+- **本工具生成的文件**（含 JSON、文本、图片等，例如 `graphs/` 下派生地形、等高线、气温图及相关元数据）：以 **CC BY-SA 4.0** 授权，全文见 `LICENSE.CC-BY-SA-4.0`。
+- 使用他人地图或数据作为输入时，须另行遵守其原有授权；本声明不授予对第三方输入的权利。

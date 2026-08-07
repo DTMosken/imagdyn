@@ -129,6 +129,9 @@ python -m imagdyn temperature -- --cpu --maritime-iters 2
 
 ```text
 IMagDyn/   (仓库根目录)
+├── LICENSE                    # 源代码：GPLv3
+├── LICENSE.CC-BY-SA-4.0       # 生成文件：CC BY-SA 4.0
+├── NOTICE                     # 双许可说明
 ├── IMagDyn.cmd / IMagDyn.sh   # 主入口
 ├── magdyn.cmd / magdyn.sh     # 兼容转发
 ├── viewer.bat
@@ -143,6 +146,7 @@ IMagDyn/   (仓库根目录)
 │   ├── timing.py
 │   └── reshape.py             # 可选，本地-only
 ├── viewer/index.html
+├── docs/screenshots/          # README 界面示例图
 └── graphs/
     ├── assets.json
     ├── template/              # 可选种子 Full Elevation
@@ -176,7 +180,23 @@ IMagDyn/   (仓库根目录)
 - **读数**：悬停与钉点（经纬、海陆、海拔或水深、气温）；钉点可看全年气温曲线  
 - **资源**：优先 `graphs/assets.json`，否则逐文件探测  
 
+### 界面示例
 
+#### 全海拔地形（Terrain - Full Elevation）
+
+![全海拔地形](docs/screenshots/terrain-full-elevation.png)
+
+#### 年平均气温（Temperature - Annual Mean）
+
+![年平均气温](docs/screenshots/temperature-annual-mean.png)
+
+#### 8 月气温（Temperature - 08 August）
+
+![8 月气温](docs/screenshots/temperature-august.png)
+
+#### 1 月气温（Temperature - 01 January）
+
+![1 月气温](docs/screenshots/temperature-january.png)
 
 ---
 
@@ -185,6 +205,21 @@ IMagDyn/   (仓库根目录)
 - Python **3.10+**
 - 通用：`numpy`、`Pillow`、`scipy`（`summarize` 海岸采样等）
 - 气温：`torch`（使用 CUDA 显卡加速；`--cpu` 可强制 CPU）
+
+---
+
+## 许可
+
+本项目采用**双许可**，详见仓库根目录 [`NOTICE`](NOTICE)：
+
+| 内容 | 许可 | 全文 |
+|------|------|------|
+| **源代码**（`imagdyn/`、入口脚本、`viewer/` 等） | [GNU GPLv3](https://www.gnu.org/licenses/gpl-3.0.html) | [`LICENSE`](LICENSE) |
+| **生成文件**（含 JSON、文本、图片等，例如 `graphs/` 下派生地形、等高线、气温图与相关元数据） | [CC BY-SA 4.0](https://creativecommons.org/licenses/by-sa/4.0/) | [`LICENSE.CC-BY-SA-4.0`](LICENSE.CC-BY-SA-4.0) |
+
+Copyright (C) 2026 DTMosken
+
+使用第三方地图或数据作为输入时，须另行遵守其原有授权；本项目不授予对第三方输入的权利。生成物在纳入此类材料时，可能同时受上游许可约束。
 
 ---
 
