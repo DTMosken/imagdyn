@@ -24,8 +24,12 @@ graphs/Terrain - Land Mask.png
 graphs/Satellite Color.png
 graphs/Terrain - Contours.png
 graphs/assets.json
+graphs/bench_cpu_gpu.json
 # Local-only terrain remapping (not shipped)
 magdyn/reshape.py
 reshape_terrain.py
 .magdyn_lang
 .magdyn_env
+__pycache__/
+**/__pycache__/
+*.py[cod]
