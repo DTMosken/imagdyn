@@ -261,8 +261,7 @@
       font-style: italic;
     }
 
-    #legendCard { display: none; }
-    #legendCard.show { display: block; }
+    #legendCard { display: block; }
 
     .legend-bar {
       height: 14px;
@@ -371,13 +370,13 @@
       <label class="ctrl">图层
         <select id="layerSelect" aria-label="选择图层"></select>
       </label>
-      <label class="toggle ctrl">
-        <input type="checkbox" id="legendToggle" checked />
-        图例
-      </label>
       <label class="toggle ctrl" title="对地形/气温灰度图套用色阶显示">
         <input type="checkbox" id="colorScaleToggle" checked />
         色阶
+      </label>
+      <label class="toggle ctrl" title="叠加经纬网；赤道 / 回归线 / 极圈加粗">
+        <input type="checkbox" id="graticuleToggle" />
+        经纬度
       </label>
       <label class="toggle ctrl" title="用 Land Mask 描边陆地边界">
         <input type="checkbox" id="coastToggle" checked />
@@ -427,17 +426,18 @@
   <script>
 (() => {
   const TEMP_META_URL = "../graphs/temperature/temperature_meta.json";
+  const ASSETS_URL = "../graphs/assets.json";
   const LAND_MASK_URL = "../graphs/Terrain - Land Mask.png";
   const ELEV_URL = "../graphs/Terrain - Full Elevation.png";
-
   const CONTOUR_URL = "../graphs/Terrain - Contours.png";
+  const SAT_URL = "../graphs/Satellite Color.png";
 
   const MONTH_NAMES = [
     "January | 1", "February | 2", "March | 3", "April | 4", "May | 5", "June | 6",
     "July | 7", "August | 8", "September | 9", "October | 10", "November | 11", "December | 12",
   ];
 
-  const TEMP_LAYERS = [
+  const TEMP_LAYER_DEFS = [
     { id: "t-ann", name: "Temperature — Annual Mean", src: "../graphs/temperature/Temperature - Annual Mean.png", monthIndex: -1 },
     { id: "t-01", name: "Temperature — 01 January", src: "../graphs/temperature/Temperature - 01 January.png", monthIndex: 0 },
     { id: "t-02", name: "Temperature — 02 February", src: "../graphs/temperature/Temperature - 02 February.png", monthIndex: 1 },
@@ -454,21 +454,12 @@
   ];
 
   /** @type {{ id: string, name: string, group: string, src: string, kind: string, monthIndex?: number }[]} */
-  const LAYERS = [
-    { id: "sat", name: "Satellite Color", group: "Base", src: "../graphs/Satellite Color.png", kind: "rgb" },
-    { id: "elev-full", name: "Terrain — Full Elevation", group: "Terrain", src: ELEV_URL, kind: "elev_full" },
-    ...TEMP_LAYERS.map((t) => ({
-      id: t.id,
-      name: t.name,
-      group: "Temperature",
-      src: t.src,
-      kind: "temperature",
-      monthIndex: t.monthIndex,
-    })),
-  ];
+  let LAYERS = [];
+  /** @type {{ id: string, name: string, src: string, monthIndex: number }[]} */
+  let TEMP_LAYERS = [];
 
   const state = {
-    layer: LAYERS.find((l) => l.id === "t-ann") || LAYERS[0],
+    layer: null,
     img: null,
     coastOverlay: null,
     contourOverlay: null,
@@ -486,14 +477,15 @@
     tempMeta: {
       gray_scale_C: [-60, 45],
       max_elev_m: 8000,
+      min_elev_m: -8000,
       freeze_C: 0,
     },
     /** Global chart Y axis: same range & step for every pin */
     chartY: { min: -60, max: 45, step: 15 },
-    showLegend: true,
     useColorScale: true,
     showCoast: true,
     showContours: false,
+    showGraticule: false,
     chartPoints: /** @type {{ i: number, x: number, y: number, t: number }[]} */ ([]),
     // Global data (Uint8 grayscale / land bit)
     land: null,
@@ -501,12 +493,16 @@
     tempAnnual: null,
     tempMonths: /** @type {(Uint8Array|null)[]} */ (Array(12).fill(null)),
     dataReady: false,
+    assets: null,
+    hasSatellite: false,
+    hasContours: false,
+    hasTemps: false,
   };
 
   const els = {
     select: document.getElementById("layerSelect"),
-    legendToggle: document.getElementById("legendToggle"),
     colorScaleToggle: document.getElementById("colorScaleToggle"),
+    graticuleToggle: document.getElementById("graticuleToggle"),
     coastToggle: document.getElementById("coastToggle"),
     contourToggle: document.getElementById("contourToggle"),
     btnReset: document.getElementById("btnReset"),
@@ -607,6 +603,75 @@
       img.onerror = () => reject(new Error(`无法加载 ${url}`));
       img.src = url;
     });
+  }
+
+  async function urlExists(url) {
+    try {
+      const res = await fetch(url, { method: "HEAD", cache: "no-store" });
+      if (res.ok) return true;
+    } catch (_) { /* fall through */ }
+    try {
+      const res = await fetch(url, { method: "GET", cache: "no-store" });
+      return res.ok;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  async function loadAssetsManifest() {
+    try {
+      const res = await fetch(ASSETS_URL, { cache: "no-store" });
+      if (res.ok) return await res.json();
+    } catch (_) { /* probe below */ }
+    return null;
+  }
+
+  function buildLayersFromFlags({ satellite, months, annual }) {
+    const layers = [];
+    if (satellite) {
+      layers.push({ id: "sat", name: "Satellite Color", group: "Base", src: SAT_URL, kind: "rgb" });
+    }
+    layers.push({ id: "elev-full", name: "Terrain — Full Elevation", group: "Terrain", src: ELEV_URL, kind: "elev_full" });
+    TEMP_LAYERS = [];
+    if (annual) {
+      const t = TEMP_LAYER_DEFS[0];
+      TEMP_LAYERS.push(t);
+      layers.push({ id: t.id, name: t.name, group: "Temperature", src: t.src, kind: "temperature", monthIndex: t.monthIndex });
+    }
+    for (let i = 0; i < 12; i++) {
+      if (!months[i]) continue;
+      const t = TEMP_LAYER_DEFS[i + 1];
+      TEMP_LAYERS.push(t);
+      layers.push({ id: t.id, name: t.name, group: "Temperature", src: t.src, kind: "temperature", monthIndex: t.monthIndex });
+    }
+    LAYERS = layers;
+    state.layer = LAYERS.find((l) => l.id === "t-ann") || LAYERS.find((l) => l.kind === "temperature") || LAYERS.find((l) => l.id === "elev-full") || LAYERS[0];
+    state.hasSatellite = !!satellite;
+    state.hasTemps = TEMP_LAYERS.length > 0;
+  }
+
+  async function resolveLayers() {
+    const manifest = await loadAssetsManifest();
+    if (manifest) {
+      state.assets = manifest;
+      const months = Array.isArray(manifest.temperature_months)
+        ? manifest.temperature_months.map(Boolean)
+        : Array(12).fill(false);
+      buildLayersFromFlags({
+        satellite: !!manifest.satellite,
+        months,
+        annual: !!manifest.temperature_annual,
+      });
+      state.hasContours = !!manifest.contours;
+      return;
+    }
+    const [satellite, annual, ...monthFlags] = await Promise.all([
+      urlExists(SAT_URL),
+      urlExists(TEMP_LAYER_DEFS[0].src),
+      ...TEMP_LAYER_DEFS.slice(1).map((t) => urlExists(t.src)),
+    ]);
+    buildLayersFromFlags({ satellite, months: monthFlags, annual });
+    state.hasContours = await urlExists(CONTOUR_URL);
   }
 
   function imageToGray(img) {
@@ -788,6 +853,104 @@
         ctx.drawImage(state.contourOverlay, state.tx + k * dw, state.ty, dw, dh);
       }
     }
+    if (state.showGraticule) {
+      drawGraticule(first, last, dw, dh, rect);
+    }
+  }
+
+  /** Image y for latitude (equirectangular, +90 at top). */
+  function latToY(lat) {
+    return ((90 - lat) / 180) * state.ih;
+  }
+  /** Image x for longitude (−180…180). */
+  function lonToX(lon) {
+    return ((lon + 180) / 360) * state.iw;
+  }
+
+  function drawGraticule(first, last, dw, dh, rect) {
+    const OBL = 23.5;
+    const specialLats = [
+      { lat: 0, kind: "equator" },
+      { lat: OBL, kind: "tropic" },
+      { lat: -OBL, kind: "tropic" },
+      { lat: 90 - OBL, kind: "polar" },
+      { lat: -(90 - OBL), kind: "polar" },
+    ];
+    const specialSet = new Set(specialLats.map((s) => s.lat));
+
+    ctx.save();
+    ctx.lineCap = "butt";
+
+    // Regular parallels every 30° (skip specials; drawn thicker later)
+    ctx.strokeStyle = "rgba(220, 230, 240, 0.28)";
+    ctx.lineWidth = 1;
+    ctx.setLineDash([]);
+    for (let lat = -60; lat <= 60; lat += 30) {
+      if (specialSet.has(lat)) continue;
+      const iy = latToY(lat);
+      const sy = state.ty + iy * state.scale;
+      if (sy < -2 || sy > rect.height + 2) continue;
+      ctx.beginPath();
+      ctx.moveTo(0, sy);
+      ctx.lineTo(rect.width, sy);
+      ctx.stroke();
+    }
+
+    // Regular meridians every 30° (prime meridian drawn thicker below)
+    for (let lon = -180; lon < 180; lon += 30) {
+      if (lon === 0) continue;
+      const ix = lonToX(lon);
+      for (let k = first; k <= last; k++) {
+        const sx = state.tx + k * dw + ix * state.scale;
+        if (sx < -2 || sx > rect.width + 2) continue;
+        ctx.beginPath();
+        ctx.moveTo(sx, state.ty);
+        ctx.lineTo(sx, state.ty + dh);
+        ctx.stroke();
+      }
+    }
+
+    // Special parallels: equator / tropics / polar circles (thicker)
+    for (const { lat, kind } of specialLats) {
+      const iy = latToY(lat);
+      const sy = state.ty + iy * state.scale;
+      if (sy < -4 || sy > rect.height + 4) continue;
+      if (kind === "equator") {
+        ctx.strokeStyle = "rgba(255, 220, 120, 0.85)";
+        ctx.lineWidth = 2.6;
+        ctx.setLineDash([]);
+      } else if (kind === "tropic") {
+        ctx.strokeStyle = "rgba(255, 170, 90, 0.75)";
+        ctx.lineWidth = 2.1;
+        ctx.setLineDash([7, 5]);
+      } else {
+        ctx.strokeStyle = "rgba(160, 210, 255, 0.8)";
+        ctx.lineWidth = 2.1;
+        ctx.setLineDash([5, 5]);
+      }
+      ctx.beginPath();
+      ctx.moveTo(0, sy);
+      ctx.lineTo(rect.width, sy);
+      ctx.stroke();
+    }
+
+    // Prime meridian slightly emphasized
+    {
+      const ix = lonToX(0);
+      ctx.strokeStyle = "rgba(255, 220, 120, 0.55)";
+      ctx.lineWidth = 1.8;
+      ctx.setLineDash([]);
+      for (let k = first; k <= last; k++) {
+        const sx = state.tx + k * dw + ix * state.scale;
+        if (sx < -2 || sx > rect.width + 2) continue;
+        ctx.beginPath();
+        ctx.moveTo(sx, state.ty);
+        ctx.lineTo(sx, state.ty + dh);
+        ctx.stroke();
+      }
+    }
+
+    ctx.restore();
   }
 
   function wrapX(x) {
@@ -866,9 +1029,12 @@
 
   async function shiftMonth(delta) {
     if (!isMonthlyTemp(state.layer)) return;
-    const next = (state.layer.monthIndex + delta + 12) % 12;
-    const layer = LAYERS.find((l) => l.monthIndex === next);
-    if (!layer) return;
+    const monthly = LAYERS.filter((l) => typeof l.monthIndex === "number" && l.monthIndex >= 0)
+      .sort((a, b) => a.monthIndex - b.monthIndex);
+    if (!monthly.length) return;
+    const idx = monthly.findIndex((l) => l.id === state.layer.id);
+    if (idx < 0) return;
+    const layer = monthly[(idx + delta + monthly.length) % monthly.length];
     els.select.value = layer.id;
     await loadLayer(layer, { keepView: true });
   }
@@ -883,19 +1049,22 @@
     return tMin + (g / 255) * (tMax - tMin);
   }
 
-  function elevFromGray(g, isLand) {
+  function elevFromGray(g, _isLand) {
+    // README: >0.5 → 0…max_elev_m; <0.5 → 0…min_elev_m (default ±8000), both linear in gray.
     const maxElev = state.tempMeta.max_elev_m || 8000;
+    const minElev = state.tempMeta.min_elev_m != null ? state.tempMeta.min_elev_m : -maxElev;
     const v01 = g / 255;
-    if (isLand) {
+    if (v01 >= 0.5) {
       return Math.max(0, ((v01 - 0.5) / 0.5) * maxElev);
     }
-    // Linear bathymetry (same scale as land max)
-    return -Math.max(0, ((0.5 - v01) / 0.5) * maxElev);
+    const t = Math.max(0, (0.5 - v01) / 0.5);
+    return t * minElev; // minElev ≤ 0
   }
 
   function legendFor(kind) {
     const [tMin, tMax] = state.tempMeta.gray_scale_C;
     const maxElev = state.tempMeta.max_elev_m || 8000;
+    const minElev = state.tempMeta.min_elev_m != null ? state.tempMeta.min_elev_m : -maxElev;
     if (kind === "temperature") {
       return {
         title: "气温",
@@ -909,9 +1078,9 @@
       return {
         title: "全海拔",
         gradient: state.useColorScale ? LEGEND_CSS.elev_full : "linear-gradient(90deg,#050505,#808080 50%,#fff)",
-        left: `深海 (−${maxElev} m)`,
+        left: `深海 (${minElev} m)`,
         right: `高峰 (+${maxElev} m)`,
-        note: "0.5 = 海平面；≤0 浅蓝，>0 按海拔分色（约 1/1.5/2/3 km 更易辨识）。",
+        note: "0.5 = 海平面；陆地/海洋均为线性：+max_elev_m / min_elev_m。",
       };
     }
     return {
@@ -1171,11 +1340,6 @@
   }
 
   function updateLegend() {
-    if (!state.showLegend) {
-      els.legendCard.classList.remove("show");
-      return;
-    }
-    els.legendCard.classList.add("show");
     const L = legendFor(state.layer.kind);
     els.legendBody.innerHTML = `
       <div style="font-family:var(--font-data);font-size:0.78rem;margin-bottom:0.25rem">${L.title}</div>
@@ -1257,6 +1421,7 @@
     if (state.useColorScale && supportsColorScale(layer.kind)) notes.push("色阶");
     if (state.showCoast) notes.push("描边");
     if (state.showContours) notes.push("等高线");
+    if (state.showGraticule) notes.push("经纬网");
     setStatus(`${layer.name} · ${state.iw}×${state.ih}${notes.length ? " · " + notes.join(" · ") : ""}`);
   }
 
@@ -1270,35 +1435,55 @@
   }
 
   async function loadGlobalData() {
-    setStatus("加载 Land Mask / 海拔 / 气温数据…");
+    setStatus("加载海拔 / Land Mask…");
     const elevImg = await loadImage(ELEV_URL);
-    const landImg = await loadImage(LAND_MASK_URL);
-    const { gray: elevGray, w, h } = imageToGray(elevImg);
-    const { gray: landGray } = imageToGray(landImg);
-    if (w !== landImg.naturalWidth || h !== landImg.naturalHeight) {
-      throw new Error("海拔与 Land Mask 尺寸不一致");
+    let landImg = null;
+    try {
+      landImg = await loadImage(LAND_MASK_URL);
+    } catch (_) {
+      landImg = null;
     }
+    const { gray: elevGray, w, h } = imageToGray(elevImg);
     state.iw = w;
     state.ih = h;
     state.elevGray = elevGray;
     state.land = new Uint8Array(w * h);
-    for (let i = 0; i < landGray.length; i++) state.land[i] = landGray[i] > 127 ? 1 : 0;
+    if (landImg && landImg.naturalWidth === w && landImg.naturalHeight === h) {
+      const { gray: landGray } = imageToGray(landImg);
+      for (let i = 0; i < landGray.length; i++) state.land[i] = landGray[i] > 127 ? 1 : 0;
+    } else {
+      // Derive land from full elevation (0.5 = sea level) if mask missing
+      for (let i = 0; i < elevGray.length; i++) state.land[i] = elevGray[i] > 127 ? 1 : 0;
+      setStatus("未找到 Land Mask，已从全海拔推导海陆", true);
+    }
     state.coastOverlay = buildCoastOverlay(state.land, w, h);
 
-    setStatus("加载等高线叠加…");
-    try {
-      const contourImg = await loadImage(CONTOUR_URL);
-      state.contourOverlay = buildContourOverlay(contourImg);
-    } catch (_) {
-      state.contourOverlay = null;
+    if (state.hasContours !== false) {
+      setStatus("加载等高线叠加…");
+      try {
+        const contourImg = await loadImage(CONTOUR_URL);
+        state.contourOverlay = buildContourOverlay(contourImg);
+        state.hasContours = true;
+      } catch (_) {
+        state.contourOverlay = null;
+        state.hasContours = false;
+      }
     }
 
-    // Load all temperature maps (parallel)
-    setStatus("加载气温月图…");
-    const tempImgs = await Promise.all(TEMP_LAYERS.map((t) => loadImage(t.src)));
-    state.tempAnnual = imageToGray(tempImgs[0]).gray;
-    for (let m = 0; m < 12; m++) {
-      state.tempMonths[m] = imageToGray(tempImgs[m + 1]).gray;
+    state.tempAnnual = null;
+    state.tempMonths = Array(12).fill(null);
+    if (TEMP_LAYERS.length) {
+      setStatus("加载气温图…");
+      for (const t of TEMP_LAYERS) {
+        try {
+          const img = await loadImage(t.src);
+          const { gray } = imageToGray(img);
+          if (t.monthIndex < 0) state.tempAnnual = gray;
+          else state.tempMonths[t.monthIndex] = gray;
+        } catch (_) {
+          /* skip missing month */
+        }
+      }
     }
     state.dataReady = true;
   }
@@ -1320,14 +1505,14 @@
     shiftMonth(1).catch((err) => setStatus(String(err.message || err), true));
   });
 
-  els.legendToggle.addEventListener("change", () => {
-    state.showLegend = els.legendToggle.checked;
-    updateLegend();
-  });
-
   els.colorScaleToggle.addEventListener("change", () => {
     state.useColorScale = els.colorScaleToggle.checked;
     refreshDisplay();
+  });
+
+  els.graticuleToggle.addEventListener("change", () => {
+    state.showGraticule = els.graticuleToggle.checked;
+    draw();
   });
 
   els.coastToggle.addEventListener("change", () => {
@@ -1429,6 +1614,9 @@
   });
 
   async function init() {
+    setStatus("检测可用图层…");
+    await resolveLayers();
+    if (!LAYERS.length) throw new Error("没有可用图层（至少需要 Terrain - Full Elevation.png）");
     fillSelect();
     try {
       const res = await fetch(TEMP_META_URL);
@@ -1436,6 +1624,8 @@
         const meta = await res.json();
         if (meta.gray_scale_C) state.tempMeta.gray_scale_C = meta.gray_scale_C;
         if (meta.max_elev_m) state.tempMeta.max_elev_m = meta.max_elev_m;
+        if (meta.min_elev_m != null) state.tempMeta.min_elev_m = meta.min_elev_m;
+        else if (meta.max_elev_m) state.tempMeta.min_elev_m = -Math.abs(meta.max_elev_m);
         if (meta.freeze_C != null) state.tempMeta.freeze_C = meta.freeze_C;
       }
     } catch (_) { /* defaults */ }
@@ -1443,9 +1633,20 @@
 
     resizeCanvas();
     await loadGlobalData();
+    // Hide contour toggle if no contours
+    if (!state.hasContours && els.contourToggle) {
+      const lab = els.contourToggle.closest("label");
+      if (lab) lab.style.display = "none";
+    }
     updateLegend();
     await loadLayer(state.layer);
-    setStatus(`${state.layer.name} · ${state.iw}×${state.ih} · 数据就绪`);
+    const bits = [];
+    if (!state.hasSatellite) bits.push("无卫星图");
+    if (!state.hasTemps) bits.push("无气温层");
+    setStatus(
+      `${state.layer.name} · ${state.iw}×${state.ih} · 数据就绪` +
+        (bits.length ? ` · ${bits.join(" · ")}` : "")
+    );
   }
 
   init().catch((e) => setStatus(String(e.message || e), true));

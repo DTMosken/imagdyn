@@ -3,28 +3,33 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import numpy as np
 from PIL import Image
 
+from . import assets, paths
+from .assets import ensure_derived_terrain
+from .timing import StepTimer, format_duration
+
 
 def main() -> None:
-    root = Path(__file__).resolve().parent
-    elev_path = root / "graphs" / "Terrain - Full Elevation.png"
-    land_path = root / "graphs" / "Terrain - Land Mask.png"
-    out_path = root / "graphs" / "Terrain - Contours.png"
+    wall = StepTimer("contours")
+    with wall.step("ensure"):
+        ensure_derived_terrain(seed_template=True)
+    elev_path = paths.GRAPHS / paths.FULL_ELEV
+    land_path = paths.GRAPHS / paths.LAND_MASK
+    out_path = paths.GRAPHS / paths.CONTOURS
 
-    elev = np.asarray(Image.open(elev_path), dtype=np.float32)
-    if elev.ndim == 3:
-        elev = elev[..., 0]
-    if elev.max() > 1.5:
-        elev = elev / 255.0
+    with wall.step("load"):
+        elev = np.asarray(Image.open(elev_path), dtype=np.float32)
+        if elev.ndim == 3:
+            elev = elev[..., 0]
+        if elev.max() > 1.5:
+            elev = elev / 255.0
 
-    land = np.asarray(Image.open(land_path), dtype=np.float32)
-    if land.ndim == 3:
-        land = land[..., 0]
-    land = land > 127
+        land = np.asarray(Image.open(land_path), dtype=np.float32)
+        if land.ndim == 3:
+            land = land[..., 0]
+        land = land > 127
 
     max_elev_m = 8000.0
     elev_m = np.where(land, (elev - 0.5) / 0.5 * max_elev_m, 0.0).astype(np.float32)
@@ -46,6 +51,9 @@ def main() -> None:
     # Contour levels (m). Index every 1000 m drawn thicker.
     minor = np.arange(200, max_elev_m + 1, 200, dtype=np.float32)
     major = np.arange(1000, max_elev_m + 1, 1000, dtype=np.float32)
+    major_set = {float(x) for x in major}
+    minor_only = [float(lv) for lv in minor if float(lv) not in major_set]
+    level_timer = StepTimer("levels", total_steps=len(minor_only) + len(major))
 
     def contour_at(level: float) -> np.ndarray:
         above = (elev_m >= level) & land
@@ -65,14 +73,14 @@ def main() -> None:
         return out & land
 
     minor_edge = np.zeros((h, w), dtype=bool)
-    for lv in minor:
-        if float(lv) in set(float(x) for x in major):
-            continue
-        minor_edge |= contour_at(float(lv))
+    for lv in minor_only:
+        with level_timer.step(f"minor_{int(lv)}"):
+            minor_edge |= contour_at(lv)
 
     major_edge = np.zeros((h, w), dtype=bool)
     for lv in major:
-        major_edge |= dilate4(contour_at(float(lv)))
+        with level_timer.step(f"major_{int(lv)}"):
+            major_edge |= dilate4(contour_at(float(lv)))
 
     coast = np.zeros((h, w), dtype=bool)
     coast[:, 1:] |= land[:, 1:] & ~land[:, :-1]
@@ -86,9 +94,20 @@ def main() -> None:
     rgb[major_edge] = (0.95, 0.90, 0.75)
     rgb[coast] = (0.85, 0.78, 0.55)
 
-    out = (np.clip(rgb, 0, 1) * 255).astype(np.uint8)
-    Image.fromarray(out, mode="RGB").save(out_path)
-    print(f"Wrote {out_path}  minor={int(minor_edge.sum())} major={int(major_edge.sum())}")
+    with wall.step("write"):
+        out = (np.clip(rgb, 0, 1) * 255).astype(np.uint8)
+        Image.fromarray(out, mode="RGB").save(out_path)
+        assets.write_assets_json()
+
+    print(
+        f"Wrote {out_path}  minor={int(minor_edge.sum())} major={int(major_edge.sum())}"
+    )
+    print(
+        f"  levels {len(level_timer.steps)}  "
+        f"avg/level {format_duration(level_timer.mean_step)}  "
+        f"levels total {format_duration(sum(d for _, d in level_timer.steps))}"
+    )
+    print(wall.summary())
 
 
 if __name__ == "__main__":

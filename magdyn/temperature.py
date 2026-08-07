@@ -35,6 +35,8 @@ import torch.nn.functional as F
 from PIL import Image
 from scipy import ndimage
 
+from .timing import StepTimer, format_duration
+
 
 SIGMA = 5.670374419e-8  # Stefan-Boltzmann, W m^-2 K^-4
 
@@ -261,12 +263,14 @@ def earthlike_sst_profile_C(lat_deg: torch.Tensor) -> torch.Tensor:
 
 
 def earthlike_sst_month_C(lat_deg: torch.Tensor, decl_deg: float) -> torch.Tensor:
-    """Annual SST profile + modest midlatitude seasonal swing."""
+    """Annual SST profile + modest midlatitude seasonal swing (weak inside polar circles)."""
     ann = earthlike_sst_profile_C(lat_deg)
     phi = torch.deg2rad(lat_deg)
     season = float(np.sin(np.deg2rad(decl_deg)))
-    mid = torch.exp(-0.5 * ((lat_deg.abs() - 45.0) / 18.0) ** 2)
-    d_t = 4.0 * season * torch.sin(phi) * mid
+    mid = torch.exp(-0.5 * ((lat_deg.abs() - 42.0) / 16.0) ** 2)
+    # Gate out seasonal SST swing poleward of ~60° (polar oceans stay near annual)
+    polar_gate = 1.0 - soft_step(lat_deg.abs(), 58.0, 8.0)
+    d_t = 3.5 * season * torch.sin(phi) * mid * polar_gate
     return (ann + d_t).clamp(-1.8, 30.5)
 
 
@@ -369,6 +373,7 @@ def synthesize_temperatures(
     Open-ocean maritime influence is monthly: water with that month's
     temperature <= freeze_C does not count as open ocean for that month.
     """
+    job_timer = StepTimer("synthesize")
     elev = torch.from_numpy(elev01).to(device=device, dtype=torch.float32)
     land = torch.from_numpy(land_np.astype(np.bool_)).to(device=device)
     h, w = elev.shape
@@ -404,8 +409,11 @@ def synthesize_temperatures(
     dist_km_ref = torch.zeros((h, w), device=device, dtype=torch.float32)
     maritime_ref = torch.zeros((h, w), device=device, dtype=torch.float32)
 
-    for it in range(max(1, maritime_iters)):
-        print(f"  maritime iter {it + 1}/{max(1, maritime_iters)}…", flush=True)
+    n_iters = max(1, maritime_iters)
+    month_timer = StepTimer("month", total_steps=n_iters * 12)
+
+    for it in range(n_iters):
+        print(f"  maritime iter {it + 1}/{n_iters}…", flush=True)
         albedo = albedo_land * land_soft + albedo_ocean * water_soft
         t_rad0 = radiative_temperature_C(q_ann_eff, albedo, greenhouse_factor)
         ice_lat = soft_step(abs_lat, obliquity_deg + 28.0, 10.0)[:, None].expand(h, w)
@@ -419,7 +427,8 @@ def synthesize_temperatures(
         t_rad = radiative_temperature_C(q_ann_eff, albedo, greenhouse_factor)
 
         for m in range(12):
-            print(f"    month {m + 1}/12", flush=True)
+            step_name = f"i{it+1}m{m+1}"
+            month_timer.begin(step_name)
             maritime, dist_km, _near = maritime_from_open_water(
                 open_water[m],
                 lat,
@@ -453,7 +462,11 @@ def synthesize_temperatures(
                 1.0 + continentality_amp * (1.0 - maritime) * land_soft * 0.30
             )
             sens = sens * (1.0 - 0.40 * water_soft * maritime)
+            # Polar oceans: damp insolation-driven seasonal swing (ice / deep mixed layer)
+            polar_w = soft_step(abs_lat, 58.0, 8.0)[:, None].expand(h, w)
+            sens = sens * (1.0 - 0.75 * polar_w * water_soft)
             inertia = land_inertia + (ocean_inertia - land_inertia) * maritime
+            inertia = torch.clamp(inertia + 0.08 * polar_w * water_soft, 0.0, 0.97)
 
             dq = q_months[m] - q_annual
             d_t = sens * dq * (1.0 - 0.55 * inertia)
@@ -475,6 +488,14 @@ def synthesize_temperatures(
                 land_pull=coast_land_pull,
                 ocean_pull=coast_ocean_pull,
             )
+            if device.type == "cuda":
+                torch.cuda.synchronize()
+            dt = month_timer.end() or 0.0
+            print(
+                f"    month {m + 1}/12  "
+                f"{month_timer.progress_line(last_name=step_name, last_dt=dt)}",
+                flush=True,
+            )
 
         open_water = water[None] * soft_step(monthly, freeze_C, freeze_soft_C)
 
@@ -488,6 +509,18 @@ def synthesize_temperatures(
     eq = (~land) & (lat2.abs() < 10.0)
     pol = (~land) & (lat2.abs() > 60.0)
     amp = (monthly[6] - monthly[0]).abs()
+    timing = {
+        "synthesize_total_s": round(job_timer.elapsed, 3),
+        "month_steps": len(month_timer.steps),
+        "month_avg_s": round(month_timer.mean_step, 3),
+        "month_total_s": round(sum(d for _, d in month_timer.steps), 3),
+    }
+    print(
+        f"  synthesize total {format_duration(job_timer.elapsed)}  "
+        f"month steps {len(month_timer.steps)}  "
+        f"avg/month {format_duration(month_timer.mean_step)}",
+        flush=True,
+    )
     meta = {
         "device": str(device),
         "declination_deg": declinations.tolist(),
@@ -513,6 +546,7 @@ def synthesize_temperatures(
         "ocean_mix_km": ocean_mix_km,
         "ocean_sst_nudge": ocean_sst_nudge,
         "maritime_iters": maritime_iters,
+        "timing": timing,
     }
 
     monthly_np = monthly.detach().cpu().numpy().astype(np.float32)
@@ -531,7 +565,9 @@ def save_gray_png(path: Path, gray: np.ndarray) -> None:
 
 
 def parse_args() -> argparse.Namespace:
-    root = Path(__file__).resolve().parent
+    from . import paths
+
+    root = paths.ROOT
     p = argparse.ArgumentParser(description="Generate monthly / annual temperature maps (GPU).")
     p.add_argument(
         "--elevation",
@@ -606,20 +642,26 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
+    from .assets import ensure_derived_terrain, write_assets_json
+
+    wall = StepTimer("temperature")
     args = parse_args()
+    with wall.step("ensure"):
+        ensure_derived_terrain(seed_template=True)
     device = get_device(prefer_gpu=not args.cpu)
     print(f"Device: {device}" + (f" ({torch.cuda.get_device_name(0)})" if device.type == "cuda" else ""))
 
-    elev = load_grayscale(args.elevation)
-    if args.land_mask.is_file():
-        land = load_grayscale(args.land_mask) > 0.5
-    else:
-        land = elev > 0.5
+    with wall.step("load"):
+        elev = load_grayscale(args.elevation)
+        if args.land_mask.is_file():
+            land = load_grayscale(args.land_mask) > 0.5
+        else:
+            land = elev > 0.5
 
-    if args.downsample > 1:
-        s = args.downsample
-        elev = elev[::s, ::s].copy()
-        land = land[::s, ::s].copy()
+        if args.downsample > 1:
+            s = args.downsample
+            elev = elev[::s, ::s].copy()
+            land = land[::s, ::s].copy()
 
     if elev.shape != land.shape:
         raise SystemExit(f"Shape mismatch: elev {elev.shape} vs land {land.shape}")
@@ -630,74 +672,81 @@ def main() -> None:
         f"max_elev={args.max_elev_m} m  freeze<={args.freeze_c} C"
     )
 
-    monthly, annual, meta = synthesize_temperatures(
-        elev,
-        land,
-        device=device,
-        s0=args.s0,
-        obliquity_deg=args.obliquity,
-        max_elev_m=args.max_elev_m,
-        lapse_k_per_km=args.lapse,
-        planet_radius_km=args.radius_km,
-        neighbor_radius_km=args.neighbor_radius_km,
-        maritime_e_fold_km=args.maritime_efold_km,
-        greenhouse_factor=args.greenhouse,
-        heat_transport=args.heat_transport,
-        albedo_ocean=args.albedo_ocean,
-        albedo_land=args.albedo_land,
-        albedo_ice=args.albedo_ice,
-        ice_threshold_C=args.ice_threshold,
-        freeze_C=args.freeze_c,
-        freeze_soft_C=args.freeze_soft_c,
-        ocean_inertia=args.ocean_inertia,
-        land_inertia=args.land_inertia,
-        continentality_amp=args.continentality_amp,
-        coast_blend_km=args.coast_blend_km,
-        ocean_mix_km=args.ocean_mix_km,
-        coast_land_pull=args.coast_land_pull,
-        coast_ocean_pull=args.coast_ocean_pull,
-        ocean_sst_nudge=args.ocean_sst_nudge,
-        maritime_iters=args.maritime_iters,
-    )
+    with wall.step("synthesize"):
+        monthly, annual, meta = synthesize_temperatures(
+            elev,
+            land,
+            device=device,
+            s0=args.s0,
+            obliquity_deg=args.obliquity,
+            max_elev_m=args.max_elev_m,
+            lapse_k_per_km=args.lapse,
+            planet_radius_km=args.radius_km,
+            neighbor_radius_km=args.neighbor_radius_km,
+            maritime_e_fold_km=args.maritime_efold_km,
+            greenhouse_factor=args.greenhouse,
+            heat_transport=args.heat_transport,
+            albedo_ocean=args.albedo_ocean,
+            albedo_land=args.albedo_land,
+            albedo_ice=args.albedo_ice,
+            ice_threshold_C=args.ice_threshold,
+            freeze_C=args.freeze_c,
+            freeze_soft_C=args.freeze_soft_c,
+            ocean_inertia=args.ocean_inertia,
+            land_inertia=args.land_inertia,
+            continentality_amp=args.continentality_amp,
+            coast_blend_km=args.coast_blend_km,
+            ocean_mix_km=args.ocean_mix_km,
+            coast_land_pull=args.coast_land_pull,
+            coast_ocean_pull=args.coast_ocean_pull,
+            ocean_sst_nudge=args.ocean_sst_nudge,
+            maritime_iters=args.maritime_iters,
+        )
 
     out = args.out_dir
     out.mkdir(parents=True, exist_ok=True)
 
-    for m, name in enumerate(MONTH_NAMES):
-        gray = temperature_to_gray(monthly[m], args.t_gray_min, args.t_gray_max)
-        path = out / f"Temperature - {name}.png"
-        save_gray_png(path, gray)
+    with wall.step("write"):
+        for m, name in enumerate(MONTH_NAMES):
+            gray = temperature_to_gray(monthly[m], args.t_gray_min, args.t_gray_max)
+            path = out / f"Temperature - {name}.png"
+            save_gray_png(path, gray)
+            print(
+                f"  wrote {path.name}  "
+                f"T=[{monthly[m].min():.1f}, {monthly[m].max():.1f}] C  "
+                f"mean={monthly[m].mean():.1f}"
+            )
+
+        gray_ann = temperature_to_gray(annual, args.t_gray_min, args.t_gray_max)
+        ann_path = out / "Temperature - Annual Mean.png"
+        save_gray_png(ann_path, gray_ann)
         print(
-            f"  wrote {path.name}  "
-            f"T=[{monthly[m].min():.1f}, {monthly[m].max():.1f}] C  "
-            f"mean={monthly[m].mean():.1f}"
+            f"  wrote {ann_path.name}  "
+            f"T=[{annual.min():.1f}, {annual.max():.1f}] C  mean={annual.mean():.1f}"
         )
 
-    gray_ann = temperature_to_gray(annual, args.t_gray_min, args.t_gray_max)
-    ann_path = out / "Temperature - Annual Mean.png"
-    save_gray_png(ann_path, gray_ann)
-    print(
-        f"  wrote {ann_path.name}  "
-        f"T=[{annual.min():.1f}, {annual.max():.1f}] C  mean={annual.mean():.1f}"
-    )
+        if args.save_npy:
+            np.save(out / "temperature_monthly_C.npy", monthly)
+            np.save(out / "temperature_annual_C.npy", annual)
+            print("  wrote .npy float32 C arrays")
 
-    if args.save_npy:
-        np.save(out / "temperature_monthly_C.npy", monthly)
-        np.save(out / "temperature_annual_C.npy", annual)
-        print("  wrote .npy float32 C arrays")
-
-    meta_out = {
-        **meta,
-        "s0_W_m2": args.s0,
-        "obliquity_deg": args.obliquity,
-        "max_elev_m": args.max_elev_m,
-        "lapse_K_per_km": args.lapse,
-        "greenhouse_factor": args.greenhouse,
-        "heat_transport": args.heat_transport,
-        "gray_scale_C": [args.t_gray_min, args.t_gray_max],
-        "gray_formula": "gray = clip(round((T_C - T_min)/(T_max - T_min)*255), 0, 255)",
-        "months": MONTH_NAMES,
-    }
+        meta_out = {
+            **meta,
+            "s0_W_m2": args.s0,
+            "obliquity_deg": args.obliquity,
+            "max_elev_m": args.max_elev_m,
+            "min_elev_m": -abs(float(args.max_elev_m)),
+            "lapse_K_per_km": args.lapse,
+            "greenhouse_factor": args.greenhouse,
+            "heat_transport": args.heat_transport,
+            "gray_scale_C": [args.t_gray_min, args.t_gray_max],
+            "gray_formula": "gray = clip(round((T_C - T_min)/(T_max - T_min)*255), 0, 255)",
+            "months": MONTH_NAMES,
+        }
+        with open(out / "temperature_meta.json", "w", encoding="utf-8") as f:
+            json.dump(meta_out, f, indent=2)
+            f.write("\n")
+    meta_out["wall_timing"] = wall.as_meta()
     with open(out / "temperature_meta.json", "w", encoding="utf-8") as f:
         json.dump(meta_out, f, indent=2)
         f.write("\n")
@@ -721,6 +770,8 @@ def main() -> None:
         "  open_water by month (%): "
         + ", ".join(f"{100*f:.0f}" for f in fracs)
     )
+    print(wall.summary())
+    write_assets_json()
 
 
 if __name__ == "__main__":
