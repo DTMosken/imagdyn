@@ -395,16 +395,16 @@ def synthesize_temperatures(
     ocean_inertia: float,
     land_inertia: float,
     continentality_amp: float,
-    coast_blend_km: float = 100.0,
+    coast_blend_km: float = 150.0,
     ocean_mix_km: float = 450.0,
-    coast_land_pull: float = 0.30,
+    coast_land_pull: float = 0.50,
     coast_ocean_pull: float = 0.45,
     ocean_sst_nudge: float = 0.55,
     maritime_iters: int = 2,
     maritime_diffuse_passes: int = 6,
     currents: bool = True,
-    current_warm_delta_C: float = 3.0,
-    current_cold_delta_C: float = -3.0,
+    current_warm_delta_C: float = 4.5,
+    current_cold_delta_C: float = -4.5,
     current_peak_lat_deg: float = 30.0,
     current_lat_sigma_deg: float = 12.0,
     current_reach_km: float = 450.0,
@@ -810,7 +810,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--coast-blend-km",
         type=float,
-        default=100.0,
+        default=150.0,
         help="Land→SST coastal blend e-folding distance (km)",
     )
     p.add_argument(
@@ -819,7 +819,7 @@ def parse_args() -> argparse.Namespace:
         default=450.0,
         help="Ocean horizontal mixing radius (km)",
     )
-    p.add_argument("--coast-land-pull", type=float, default=0.30)
+    p.add_argument("--coast-land-pull", type=float, default=0.50)
     p.add_argument("--coast-ocean-pull", type=float, default=0.45)
     p.add_argument(
         "--ocean-sst-nudge",
