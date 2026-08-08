@@ -206,6 +206,12 @@ IMagDyn/   (仓库根目录)
 - 通用：`numpy`、`Pillow`、`scipy`（`summarize` 海岸采样等）
 - 气温：`torch`（使用 CUDA 显卡加速；`--cpu` 可强制 CPU）
 
+```bash
+pip install -r requirements.txt          # 运行时
+pip install -r requirements-dev.txt      # + pytest / flake8
+python -m pytest
+```
+
 ---
 
 ## 许可
