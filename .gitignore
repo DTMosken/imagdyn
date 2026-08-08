@@ -36,3 +36,8 @@ __pycache__/
 **/__pycache__/
 *.py[cod]
 imagdyn/bench_cpu_gpu.py
+graphs/temperature/Ocean Currents - coast edges.png
+graphs/temperature/Ocean Currents - dT sign.png
+graphs/temperature/Ocean Currents - dT.png
+graphs/temperature/ocean_currents_meta.json
+graphs/temperature/annual_T_lat-32_-10_lon-32_-10.txt

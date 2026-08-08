@@ -13,6 +13,7 @@ Drivers
   maritime influence for that month
 - Coastal buffering via GPU heat-diffusion (repeated separable mean filters)
   rather than Euclidean distance transform (EDT)
+- Ocean currents (east-warm / west-cold) folded into base seawater SST targets
 
 Uses PyTorch CUDA when available (conda env tf-gpu).
 
@@ -28,6 +29,7 @@ Usage::
 from __future__ import annotations
 
 import argparse
+import gc
 import json
 from pathlib import Path
 
@@ -64,6 +66,22 @@ def get_device(prefer_gpu: bool = True) -> torch.device:
     if prefer_gpu and torch.cuda.is_available():
         return torch.device("cuda")
     return torch.device("cpu")
+
+
+def release_torch_memory() -> None:
+    """Free Python refs' follow-on GPU cache right after a temperature job."""
+    gc.collect()
+    if torch.cuda.is_available():
+        try:
+            torch.cuda.synchronize()
+        except Exception:
+            pass
+        torch.cuda.empty_cache()
+        try:
+            torch.cuda.ipc_collect()
+        except Exception:
+            pass
+    gc.collect()
 
 
 def load_grayscale(path: Path) -> np.ndarray:
@@ -384,6 +402,12 @@ def synthesize_temperatures(
     ocean_sst_nudge: float = 0.55,
     maritime_iters: int = 2,
     maritime_diffuse_passes: int = 6,
+    currents: bool = True,
+    current_warm_delta_C: float = 3.0,
+    current_cold_delta_C: float = -3.0,
+    current_peak_lat_deg: float = 30.0,
+    current_lat_sigma_deg: float = 12.0,
+    current_reach_km: float = 450.0,
 ) -> tuple[np.ndarray, np.ndarray, dict]:
     """
     Returns monthly (12,H,W) float32 C, annual (H,W) float32 C, meta dict.
@@ -391,8 +415,92 @@ def synthesize_temperatures(
     Open-ocean maritime influence is monthly: water with that month's
     temperature <= freeze_C does not count as open ocean for that month.
     Coastal buffering uses GPU diffusion (no EDT).
+
+    When ``currents`` is True, east-warm / west-cold ocean-current ΔT is
+    computed automatically and added to the base seawater SST targets before
+    ocean nudge / coastal blending (not as a post-pass).
     """
     job_timer = StepTimer("synthesize")
+    try:
+        return _synthesize_temperatures_impl(
+            elev01,
+            land_np,
+            device=device,
+            s0=s0,
+            obliquity_deg=obliquity_deg,
+            max_elev_m=max_elev_m,
+            lapse_k_per_km=lapse_k_per_km,
+            planet_radius_km=planet_radius_km,
+            neighbor_radius_km=neighbor_radius_km,
+            maritime_e_fold_km=maritime_e_fold_km,
+            greenhouse_factor=greenhouse_factor,
+            heat_transport=heat_transport,
+            albedo_ocean=albedo_ocean,
+            albedo_land=albedo_land,
+            albedo_ice=albedo_ice,
+            ice_threshold_C=ice_threshold_C,
+            freeze_C=freeze_C,
+            freeze_soft_C=freeze_soft_C,
+            ocean_inertia=ocean_inertia,
+            land_inertia=land_inertia,
+            continentality_amp=continentality_amp,
+            coast_blend_km=coast_blend_km,
+            ocean_mix_km=ocean_mix_km,
+            coast_land_pull=coast_land_pull,
+            coast_ocean_pull=coast_ocean_pull,
+            ocean_sst_nudge=ocean_sst_nudge,
+            maritime_iters=maritime_iters,
+            maritime_diffuse_passes=maritime_diffuse_passes,
+            currents=currents,
+            current_warm_delta_C=current_warm_delta_C,
+            current_cold_delta_C=current_cold_delta_C,
+            current_peak_lat_deg=current_peak_lat_deg,
+            current_lat_sigma_deg=current_lat_sigma_deg,
+            current_reach_km=current_reach_km,
+            job_timer=job_timer,
+        )
+    finally:
+        release_torch_memory()
+
+
+def _synthesize_temperatures_impl(
+    elev01: np.ndarray,
+    land_np: np.ndarray,
+    *,
+    device: torch.device,
+    s0: float,
+    obliquity_deg: float,
+    max_elev_m: float,
+    lapse_k_per_km: float,
+    planet_radius_km: float,
+    neighbor_radius_km: float,
+    maritime_e_fold_km: float,
+    greenhouse_factor: float,
+    heat_transport: float,
+    albedo_ocean: float,
+    albedo_land: float,
+    albedo_ice: float,
+    ice_threshold_C: float,
+    freeze_C: float,
+    freeze_soft_C: float,
+    ocean_inertia: float,
+    land_inertia: float,
+    continentality_amp: float,
+    coast_blend_km: float,
+    ocean_mix_km: float,
+    coast_land_pull: float,
+    coast_ocean_pull: float,
+    ocean_sst_nudge: float,
+    maritime_iters: int,
+    maritime_diffuse_passes: int,
+    currents: bool,
+    current_warm_delta_C: float,
+    current_cold_delta_C: float,
+    current_peak_lat_deg: float,
+    current_lat_sigma_deg: float,
+    current_reach_km: float,
+    job_timer: StepTimer,
+) -> tuple[np.ndarray, np.ndarray, dict]:
     elev = torch.from_numpy(elev01).to(device=device, dtype=torch.float32)
     land = torch.from_numpy(land_np.astype(np.bool_)).to(device=device)
     h, w = elev.shape
@@ -415,6 +523,34 @@ def synthesize_temperatures(
         q_months[m] = q_row[:, None].expand(h, w)
         sst_row = earthlike_sst_month_C(lat, float(dec))
         sst_targets[m] = sst_row[:, None].expand(h, w)
+
+    # Ocean currents → base seawater SST target (coast edge filter, mid-lat Gaussian)
+    currents_meta: dict | None = None
+    if currents:
+        from .currents import OceanCurrentFilter
+
+        print("  ocean currents → SST targets…", flush=True)
+        curr_filt = OceanCurrentFilter(
+            peak_lat_deg=current_peak_lat_deg,
+            lat_sigma_deg=current_lat_sigma_deg,
+            warm_delta_C=current_warm_delta_C,
+            cold_delta_C=current_cold_delta_C,
+            reach_km=current_reach_km,
+            planet_radius_km=planet_radius_km,
+            land_bleed=0.0,  # SST targets are ocean-only
+            enabled=True,
+        )
+        curr_corr = curr_filt.compute(land, lat)
+        ocean_m = (~land).float()
+        sst_targets = sst_targets + curr_corr.temperature_C[None] * ocean_m[None]
+        sst_targets = sst_targets.clamp(-1.8, 32.0)
+        currents_meta = dict(curr_corr.meta)
+        del curr_corr, curr_filt, ocean_m
+        print(
+            f"    currents dT ocean "
+            f"[{currents_meta.get('dT_min_C'):.2f}, {currents_meta.get('dT_max_C'):.2f}] C",
+            flush=True,
+        )
 
     q_annual = q_months.mean(dim=0)
     q_ann_eff = apply_heat_transport(q_annual, heat_transport)
@@ -568,11 +704,41 @@ def synthesize_temperatures(
         "maritime_iters": maritime_iters,
         "maritime_model": "gpu_diffusion",
         "maritime_diffuse_passes": maritime_diffuse_passes,
+        "ocean_currents": currents_meta,
         "timing": timing,
     }
 
     monthly_np = monthly.detach().cpu().numpy().astype(np.float32)
     annual_np = annual.detach().cpu().numpy().astype(np.float32)
+
+    # Drop device tensors immediately so VRAM/RAM can be reclaimed before write I/O
+    del (
+        elev,
+        land,
+        lat,
+        abs_lat,
+        elev_m,
+        lapse_raw,
+        land_soft,
+        water_soft,
+        q_months,
+        sst_targets,
+        q_annual,
+        q_ann_eff,
+        tropics_w,
+        dry_w,
+        water,
+        open_water,
+        monthly,
+        annual,
+        dist_km_ref,
+        maritime_ref,
+        lat2,
+        eq,
+        pol,
+        amp,
+    )
+    release_torch_memory()
     return monthly_np, annual_np, meta
 
 
@@ -661,6 +827,17 @@ def parse_args() -> argparse.Namespace:
         default=0.55,
         help="Blend weight of Earth-like SST profile into ocean cells [0,1]",
     )
+    p.add_argument(
+        "--currents",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Apply east-warm / west-cold ocean current coastline filter (default: on)",
+    )
+    p.add_argument("--current-warm-c", type=float, default=3.0, help="East-coast warm ΔT (°C)")
+    p.add_argument("--current-cold-c", type=float, default=-3.0, help="West-coast cold ΔT (°C)")
+    p.add_argument("--current-peak-lat", type=float, default=30.0, help="|lat| of max current contrast")
+    p.add_argument("--current-lat-sigma", type=float, default=12.0, help="Gaussian σ (° lat) for mid-lat weight")
+    p.add_argument("--current-reach-km", type=float, default=450.0, help="Current footprint diffusion radius (km)")
     p.add_argument("--t-gray-min", type=float, default=-60.0)
     p.add_argument("--t-gray-max", type=float, default=45.0)
     p.add_argument("--save-npy", action="store_true")
@@ -699,6 +876,13 @@ def main() -> None:
         f"S0={args.s0} W/m^2  obliquity=+/-{args.obliquity} deg  "
         f"max_elev={args.max_elev_m} m  freeze<={args.freeze_c} C"
     )
+    if args.currents:
+        print(
+            f"Ocean currents in SST targets  east=+{args.current_warm_c:.1f}C  "
+            f"west={args.current_cold_c:.1f}C  peak|lat|={args.current_peak_lat}°"
+        )
+    else:
+        print("Ocean currents OFF")
 
     with wall.step("synthesize"):
         monthly, annual, meta = synthesize_temperatures(
@@ -730,7 +914,16 @@ def main() -> None:
             ocean_sst_nudge=args.ocean_sst_nudge,
             maritime_iters=args.maritime_iters,
             maritime_diffuse_passes=args.maritime_diffuse_passes,
+            currents=bool(args.currents),
+            current_warm_delta_C=args.current_warm_c,
+            current_cold_delta_C=args.current_cold_c,
+            current_peak_lat_deg=args.current_peak_lat,
+            current_lat_sigma_deg=args.current_lat_sigma,
+            current_reach_km=args.current_reach_km,
         )
+    # Input rasters no longer needed; keep only numpy outputs for write-out
+    del elev, land
+    release_torch_memory()
 
     out = args.out_dir
     out.mkdir(parents=True, exist_ok=True)
@@ -801,6 +994,8 @@ def main() -> None:
     )
     print(wall.summary())
     write_assets_json()
+    del monthly, annual, meta, meta_out
+    release_torch_memory()
 
 
 if __name__ == "__main__":

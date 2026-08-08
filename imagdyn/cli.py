@@ -72,6 +72,20 @@ def _cmd_temperature(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_currents(args: argparse.Namespace) -> int:
+    argv_rest = list(args.currents_argv or [])
+    if argv_rest and argv_rest[0] == "--":
+        argv_rest = argv_rest[1:]
+    try:
+        from .currents import main as currents_main
+    except (ImportError, ModuleNotFoundError) as e:
+        from .envutil import format_missing_dep
+
+        print(format_missing_dep(e, lang="zh"), file=sys.stderr)
+        return 1
+    return int(currents_main(argv_rest))
+
+
 def _cmd_summarize(_: argparse.Namespace) -> int:
     try:
         from .summarize import main as summarize_main
@@ -309,6 +323,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sp.set_defaults(func=_cmd_temperature)
 
+    sp = sub.add_parser(
+        "currents",
+        help="Ocean current coastline filter (east=warm / west=cold; diagnostic maps)",
+    )
+    sp.add_argument(
+        "currents_argv",
+        nargs=argparse.REMAINDER,
+        help="Args forwarded to imagdyn.currents (e.g. --dump-maps --cpu)",
+    )
+    sp.set_defaults(func=_cmd_currents)
+
     sp = sub.add_parser("summarize", help="Write temperature_stats.json")
     sp.set_defaults(func=_cmd_summarize)
 
@@ -358,6 +383,8 @@ def main(argv: list[str] | None = None) -> int:
         return interactive_menu(lang=args.lang)
     if args.command == "temperature" and args.temp_argv and args.temp_argv[0] == "--":
         args.temp_argv = args.temp_argv[1:]
+    if args.command == "currents" and args.currents_argv and args.currents_argv[0] == "--":
+        args.currents_argv = args.currents_argv[1:]
     func: Callable[[argparse.Namespace], int] = args.func
     return int(func(args))
 

@@ -92,6 +92,8 @@ gray = clip((T_C − T_MIN) / (T_MAX − T_MIN) × 255)
 
 沿海海洋缓冲使用基于PyTorch的 **GPU 热扩散**（对开放洋面 mask 做多次可分离均值滤波）。相关参数：`--maritime-efold-km`、`--maritime-diffuse-passes` 等（见 `python -m imagdyn temperature -- --help`）。
 
+洋流微调（独立模块 `imagdyn.currents`）：海岸线边缘检测后，大陆**东岸暖流 / 西岸寒流**，纬度权重为峰值约 **30°** 的高斯函数；在生成**基础海水 SST 目标**时自动叠加（`--no-currents` 可关）。湿度修正仅占位。诊断图：`python -m imagdyn currents -- --dump-maps`。
+
 ---
 
 ## 推荐流水线
