@@ -22,15 +22,11 @@
 
 ![年平均气温](docs/screenshots/temperature-annual-mean.png)
 
-#### 季节气温（6 / 8 / 9 / 12 / 1 月）
+#### 季节气温（6 / 9 / 12）
 
-| 6 月 | 8 月 | 9 月 |
+| 6 月 | 9 月 | 12 月 |
 |------|------|------|
-| ![6 月气温](docs/screenshots/temperature-june.png) | ![9 月气温](docs/screenshots/temperature-september.png) |
-
-| 12 月 | 1 月 |
-|------|------|
-| ![12 月气温](docs/screenshots/temperature-december.png) |
+| ![6 月气温](docs/screenshots/temperature-june.png) | ![9 月气温](docs/screenshots/temperature-september.png) | ![12 月气温](docs/screenshots/temperature-december.png) |
 
 #### 年平均气压
 
