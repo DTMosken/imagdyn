@@ -7,6 +7,7 @@ import pytest
 import torch
 
 from imagdyn.temperature import (
+    small_inland_lake_mask,
     solar_declination_deg,
     soft_step,
     soft_tropics_weight,
@@ -38,5 +39,29 @@ def test_soft_tropics_and_step() -> None:
     lat = torch.tensor([0.0, 23.5, 60.0])
     w = soft_tropics_weight(lat.abs(), 23.5)
     assert float(w[0]) > float(w[1]) > float(w[2])
+    assert float(soft_step(torch.tensor([0.0]), 0.0, 1.0)) == pytest.approx(0.5, abs=0.05)
+
+
+def test_small_inland_lake_mask() -> None:
+    h, w = 64, 128
+    land = np.ones((h, w), dtype=bool)
+    # World ocean: bottom strip (largest water body)
+    land[50:, :] = False
+    # Small inland lake (4×5)
+    land[10:14, 40:45] = False
+    # Larger inland sea
+    land[20:35, 80:110] = False
+    # Coarse grid → large px area; threshold between small lake and inland sea size
+    km_per_deg = (np.pi * 6371.0) / 180.0
+    px_km2 = (180.0 / h) * km_per_deg * (360.0 / w) * km_per_deg
+    small_area = 4 * 5 * px_km2
+    mid_area = 15 * 30 * px_km2
+    thresh = 0.5 * (small_area + mid_area)
+    mask = small_inland_lake_mask(land, planet_radius_km=6371.0, max_area_km2=thresh)
+    assert bool(mask[12, 42].item())
+    assert not bool(mask[55, 10].item())  # ocean
+    assert not bool(mask[25, 90].item())  # larger inland sea
+    mask_tiny = small_inland_lake_mask(land, planet_radius_km=6371.0, max_area_km2=1.0)
+    assert not bool(mask_tiny.any().item())
     s = soft_step(torch.tensor([-2.0, 0.0, 2.0]), center=0.0, scale=0.5)
     assert float(s[0]) < 0.5 < float(s[2])

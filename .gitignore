@@ -43,3 +43,4 @@ graphs/temperature/ocean_currents_meta.json
 graphs/temperature/annual_T_lat-32_-10_lon-32_-10.txt
 imagdyn/temp_visual_diagnisis.py
 graphs/temperature/annual_T_lat-32_-10_lon-32_-10_diag.png
+graphs/wind/

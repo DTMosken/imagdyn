@@ -273,6 +273,77 @@ def main() -> None:
     print(f"  mean {c['mean']:.2f}  med {c['median']:.2f}  p10/p90 {c['p10']:.2f}/{c['p90']:.2f}  |max| {c['abs_max']:.2f}")
     print()
     print(f"Wrote {out}")
+
+    # Always (re)generate wind_stats.json when annual temperature is available
+    wind_stats_path = paths.WIND_DIR / paths.WIND_STATS
+    ann_path = TEMP_DIR / "Temperature - Annual Mean.png"
+    with wall.step("wind_stats"):
+        if ann_path.is_file() and land.shape == annual.shape:
+            try:
+                from .wind import compute_and_write_wind_stats, elev01_to_meters, get_device
+
+                print("  wind stats + waterworld 1D…", flush=True)
+                elev_m_w = elev01_to_meters(elev01, land, max_elev_m=MAX_ELEV)
+                device = get_device(prefer_gpu=True)
+                wind_stats_path = compute_and_write_wind_stats(
+                    annual.astype(np.float32),
+                    land,
+                    elev_m_w,
+                    device=device,
+                    out_dir=paths.WIND_DIR,
+                )
+                print(f"  wrote {wind_stats_path}", flush=True)
+            except Exception as exc:  # noqa: BLE001 — stats should not abort summarize
+                print(f"  wind stats skipped: {exc}", flush=True)
+        else:
+            print(
+                "  wind stats skipped: need Temperature - Annual Mean.png "
+                "matching terrain grid",
+                flush=True,
+            )
+
+    if wind_stats_path.is_file():
+        ws = json.loads(wind_stats_path.read_text(encoding="utf-8"))
+        print()
+        print("=== Wind / pressure stats ===")
+        pg = ws.get("pressure_hpa", {}).get("global", {})
+        sg = ws.get("speed_m_s", {}).get("global", {})
+        if pg:
+            print(
+                f"  pressure mean {pg.get('mean', 0):.1f} hPa  "
+                f"[{pg.get('min', 0):.1f}, {pg.get('max', 0):.1f}]"
+            )
+        if sg:
+            print(
+                f"  speed mean {sg.get('mean', 0):.2f} m/s  "
+                f"p95 {sg.get('p95', 0):.2f}  max {sg.get('max', 0):.2f}"
+            )
+        ww_root = ws.get("waterworld_1d", {})
+        cases = ww_root.get("cases") or {}
+        if cases:
+            print("  waterworld 1D (aquaplanet elev=0, all ocean):")
+            for key in ("tropic_cancer", "equator", "tropic_capricorn"):
+                c = cases.get(key) or {}
+                sm = c.get("summary") or {}
+                wwp = sm.get("pressure_hpa") or {}
+                wws = sm.get("speed_m_s") or {}
+                teq = c.get("thermal_equator_lat_deg")
+                teq_s = f"{teq:.1f}°" if isinstance(teq, (int, float)) else "—"
+                print(
+                    f"    {c.get('label', key)}: Teq={teq_s}  "
+                    f"p mean {wwp.get('mean', 0):.1f} hPa  "
+                    f"speed mean {wws.get('mean', 0):.2f} m/s"
+                )
+        else:
+            ww = ww_root.get("summary", {})
+            if ww:
+                wwp = ww.get("pressure_hpa", {})
+                wws = ww.get("speed_m_s", {})
+                print(
+                    f"  waterworld 1D  p mean {wwp.get('mean', 0):.1f} hPa  "
+                    f"speed mean {wws.get('mean', 0):.2f} m/s"
+                )
+        print(f"  (from {wind_stats_path})")
     print(wall.summary())
 
 

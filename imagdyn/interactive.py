@@ -40,11 +40,12 @@ TEXTS = {
             ("2", "ensure", "补全地形派生图 / 遮罩"),
             ("3", "contours", "生成等高线"),
             ("4", "temperature", "生成气温图"),
-            ("5", "summarize", "统计气温 / 地形"),
-            ("6", "viewer", "启动地图查看器"),
-            ("7", "pipeline", "一键流水线"),
-            ("8", "env", "环境（查看 / 切换 conda）"),
-            ("9", "lang", "切换语言 (中/英)"),
+            ("5", "wind", "生成风场 / 气压"),
+            ("6", "summarize", "统计气温 / 地形 / 风场"),
+            ("7", "viewer", "启动地图查看器"),
+            ("8", "pipeline", "一键流水线"),
+            ("9", "env", "环境（查看 / 切换 conda）"),
+            ("L", "lang", "切换语言 (中/英)"),
             ("0", "exit", "退出"),
         ],
         "force_ensure": "强制重建派生地形? [y/N]: ",
@@ -52,6 +53,7 @@ TEXTS = {
         "port": "端口 (默认 8765): ",
         "viewer_hint": "提示: Ctrl+C 停止服务器",
         "gen_temp": "生成气温图? [y/N]: ",
+        "gen_wind": "生成风场 / 气压? [y/N]: ",
         "env_header": "当前运行环境",
         "env_python": "Python",
         "env_active": "活动环境",
@@ -82,11 +84,12 @@ TEXTS = {
             ("2", "ensure", "Derive mask / above / below"),
             ("3", "contours", "Generate contour map"),
             ("4", "temperature", "Generate temperature maps"),
-            ("5", "summarize", "Climate / terrain stats"),
-            ("6", "viewer", "Start map viewer"),
-            ("7", "pipeline", "One-shot pipeline"),
-            ("8", "env", "Environment (view / switch conda)"),
-            ("9", "lang", "Switch language (ZH/EN)"),
+            ("5", "wind", "Generate wind / pressure"),
+            ("6", "summarize", "Climate / terrain / wind stats"),
+            ("7", "viewer", "Start map viewer"),
+            ("8", "pipeline", "One-shot pipeline"),
+            ("9", "env", "Environment (view / switch conda)"),
+            ("L", "lang", "Switch language (ZH/EN)"),
             ("0", "exit", "Exit"),
         ],
         "force_ensure": "Force regenerate derived terrain? [y/N]: ",
@@ -94,6 +97,7 @@ TEXTS = {
         "port": "Port (default 8765): ",
         "viewer_hint": "Tip: Ctrl+C stops the server",
         "gen_temp": "Generate temperature maps? [y/N]: ",
+        "gen_wind": "Generate wind / pressure? [y/N]: ",
         "env_header": "Current runtime",
         "env_python": "Python",
         "env_active": "Active env",
@@ -268,7 +272,7 @@ def interactive_menu(*, lang: str | None = None) -> int:
             print(f"  {key}) {label}")
         print()
         try:
-            choice = input(f"{t['prompt']} [0-9]: ").strip()
+            choice = input(f"{t['prompt']} [0-9/L]: ").strip()
         except (EOFError, KeyboardInterrupt):
             print()
             print(t["bye"])
@@ -278,7 +282,7 @@ def interactive_menu(*, lang: str | None = None) -> int:
             print(t["bye"])
             return 0
 
-        if choice == "9":
+        if choice in ("L", "l", "lang"):
             lang = "en" if lang == "zh" else "zh"
             _save_lang(lang)
             continue
@@ -299,20 +303,28 @@ def interactive_menu(*, lang: str | None = None) -> int:
                 argv = ["temperature", "--", *extra] if extra else ["temperature"]
                 _run_argv(argv, lang)
             elif choice == "5":
-                _run_argv(["summarize"], lang)
+                extra_w: list[str] = []
+                if _yes(input(t["force_cpu"]), lang):
+                    extra_w.append("--cpu")
+                argv = ["wind", "--", *extra_w] if extra_w else ["wind"]
+                _run_argv(argv, lang)
             elif choice == "6":
+                _run_argv(["summarize"], lang)
+            elif choice == "7":
                 port = input(t["port"]).strip() or "8765"
                 print()
                 print(t["viewer_hint"])
                 _run_argv(["viewer", "--port", port], lang)
-            elif choice == "7":
+            elif choice == "8":
                 argv = ["pipeline"]
                 if _yes(input(t["force_ensure"]), lang):
                     argv.append("--force")
                 if _yes(input(t["gen_temp"]), lang):
                     argv.append("--temperature")
+                if _yes(input(t["gen_wind"]), lang):
+                    argv.append("--wind")
                 _run_argv(argv, lang)
-            elif choice == "8":
+            elif choice == "9":
                 if _env_menu(lang) == "relaunch":
                     return 0
             else:

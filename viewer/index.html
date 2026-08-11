@@ -386,6 +386,10 @@
         <input type="checkbox" id="contourToggle" />
         等高线
       </label>
+      <label class="toggle ctrl" title="叠加风向箭头（需 graphs/wind UV）">
+        <input type="checkbox" id="windArrowToggle" />
+        风向
+      </label>
       <button type="button" id="btnReset" title="重置视图">重置视图</button>
       <button type="button" id="btnClearPin" title="清除固定点">清除固定</button>
       <div class="hint">滚轮缩放 · 中键/右键拖拽 · 悬停读数 · 单击固定</div>
@@ -426,11 +430,13 @@
   <script>
 (() => {
   const TEMP_META_URL = "../graphs/temperature/temperature_meta.json";
+  const WIND_META_URL = "../graphs/wind/wind_meta.json";
   const ASSETS_URL = "../graphs/assets.json";
   const LAND_MASK_URL = "../graphs/Terrain - Land Mask.png";
   const ELEV_URL = "../graphs/Terrain - Full Elevation.png";
   const CONTOUR_URL = "../graphs/Terrain - Contours.png";
   const SAT_URL = "../graphs/Satellite Color.png";
+  const WIND_UV_ANN_URL = "../graphs/wind/Wind - UV - Annual Mean.png";
 
   const MONTH_NAMES = [
     "January | 1", "February | 2", "March | 3", "April | 4", "May | 5", "June | 6",
@@ -486,17 +492,31 @@
     showCoast: true,
     showContours: false,
     showGraticule: false,
+    showWindArrows: false,
     chartPoints: /** @type {{ i: number, x: number, y: number, t: number }[]} */ ([]),
     // Global data (Uint8 grayscale / land bit)
     land: null,
     elevGray: null,
     tempAnnual: null,
     tempMonths: /** @type {(Uint8Array|null)[]} */ (Array(12).fill(null)),
+    windU: /** @type {Float32Array|null} */ (null),
+    windV: /** @type {Float32Array|null} */ (null),
+    windUvKey: /** @type {string|null} */ (null),
+    windUvCache: /** @type {Map<string, {u: Float32Array, v: Float32Array, speedScale: number[]}>} */ (new Map()),
+    windMetaFull: null,
+    pressureAnnual: /** @type {Uint8Array|null} */ (null),
+    pressureMonths: /** @type {(Uint8Array|null)[]} */ (Array(12).fill(null)),
+    windMeta: {
+      gray_scale_pressure_hpa: [980, 1040],
+      gray_scale_speed: [0, 30],
+    },
     dataReady: false,
     assets: null,
     hasSatellite: false,
     hasContours: false,
     hasTemps: false,
+    hasPressure: false,
+    hasWindUV: false,
   };
 
   const els = {
@@ -505,6 +525,7 @@
     graticuleToggle: document.getElementById("graticuleToggle"),
     coastToggle: document.getElementById("coastToggle"),
     contourToggle: document.getElementById("contourToggle"),
+    windArrowToggle: document.getElementById("windArrowToggle"),
     btnReset: document.getElementById("btnReset"),
     btnClearPin: document.getElementById("btnClearPin"),
     viewport: document.getElementById("viewport"),
@@ -560,17 +581,35 @@
       [0.92, [210, 205, 200]],      // near peak
       [1.0, [250, 250, 252]],
     ],
+    pressure: [
+      [0.0, [40, 20, 80]], [0.25, [40, 90, 180]], [0.5, [230, 230, 235]],
+      [0.75, [200, 90, 50]], [1.0, [120, 20, 30]],
+    ],
+    wind_speed: [
+      [0.0, [60, 140, 255]],
+      [0.25, [0, 245, 255]],
+      [0.5, [70, 255, 90]],
+      [0.75, [255, 230, 40]],
+      [1.0, [255, 48, 48]],
+    ],
   };
 
   const LEGEND_CSS = {
     temperature: "linear-gradient(90deg, #081030, #1e50a0, #46b4c8, #78c878, #e6d25a, #dc6e32, #8c141e)",
     elev_full: "linear-gradient(90deg, #020a30, #08286e, #125aa5, #3796d2, #9bd2f0 50%, #91d273 50%, #379646, #aac34b, #d2af46, #b96e37, #964b32, #d2cdc8, #fafafc)",
+    pressure: "linear-gradient(90deg, #281450, #285ab4, #e6e6eb, #c85a32, #78141e)",
+    wind_speed: "linear-gradient(90deg, #3c8cff, #00f5ff, #46ff5a, #ffe628, #ff3030)",
     contours: "linear-gradient(90deg, #0a1828, #2a3a30, #c8b880)",
     rgb: "linear-gradient(90deg, #1a2a1a, #3a5a7a, #c4a070, #e8e0d0)",
   };
 
   function supportsColorScale(kind) {
-    return kind === "temperature" || kind === "elev_full";
+    return kind === "temperature" || kind === "elev_full" || kind === "pressure";
+  }
+
+  function windSpeedColor(t01) {
+    const [r, g, b] = sampleStops(COLOR_STOPS.wind_speed, t01);
+    return `rgb(${r},${g},${b})`;
   }
 
   function getLut(kind) {
@@ -626,7 +665,7 @@
     return null;
   }
 
-  function buildLayersFromFlags({ satellite, months, annual }) {
+  function buildLayersFromFlags({ satellite, months, annual, pressure, pressureMonths }) {
     const layers = [];
     if (satellite) {
       layers.push({ id: "sat", name: "Satellite Color", group: "Base", src: SAT_URL, kind: "rgb" });
@@ -644,10 +683,35 @@
       TEMP_LAYERS.push(t);
       layers.push({ id: t.id, name: t.name, group: "Temperature", src: t.src, kind: "temperature", monthIndex: t.monthIndex });
     }
+    if (pressure) {
+      layers.push({
+        id: "p-ann",
+        name: "Pressure — Annual Mean",
+        group: "Atmosphere",
+        src: WIND_UV_ANN_URL,
+        kind: "pressure",
+        monthIndex: -1,
+      });
+    }
+    const pMonths = pressureMonths || [];
+    for (let i = 0; i < 12; i++) {
+      if (!pMonths[i]) continue;
+      const name = MONTH_NAMES[i].split(" | ")[0];
+      const mm = String(i + 1).padStart(2, "0");
+      layers.push({
+        id: `p-${mm}`,
+        name: `Pressure — ${mm} ${name}`,
+        group: "Atmosphere",
+        src: `../graphs/wind/Wind - UV - ${mm} ${name}.png`,
+        kind: "pressure",
+        monthIndex: i,
+      });
+    }
     LAYERS = layers;
     state.layer = LAYERS.find((l) => l.id === "t-ann") || LAYERS.find((l) => l.kind === "temperature") || LAYERS.find((l) => l.id === "elev-full") || LAYERS[0];
     state.hasSatellite = !!satellite;
     state.hasTemps = TEMP_LAYERS.length > 0;
+    state.hasPressure = !!pressure;
   }
 
   async function resolveLayers() {
@@ -661,8 +725,11 @@
         satellite: !!manifest.satellite,
         months,
         annual: !!manifest.temperature_annual,
+        pressure: !!manifest.pressure_annual,
+        pressureMonths: Array.isArray(manifest.pressure_months) ? manifest.pressure_months.map(Boolean) : [],
       });
       state.hasContours = !!manifest.contours;
+      state.hasWindUV = !!manifest.wind_uv;
       return;
     }
     const [satellite, annual, ...monthFlags] = await Promise.all([
@@ -670,11 +737,27 @@
       urlExists(TEMP_LAYER_DEFS[0].src),
       ...TEMP_LAYER_DEFS.slice(1).map((t) => urlExists(t.src)),
     ]);
-    buildLayersFromFlags({ satellite, months: monthFlags, annual });
+    const [pressure, windUV] = await Promise.all([
+      urlExists(WIND_UV_ANN_URL),
+      urlExists(WIND_UV_ANN_URL),
+    ]);
+    buildLayersFromFlags({
+      satellite,
+      months: monthFlags,
+      annual,
+      pressure,
+      pressureMonths: [],
+    });
     state.hasContours = await urlExists(CONTOUR_URL);
+    state.hasWindUV = windUV;
   }
 
   function imageToGray(img) {
+    return imageToChannel(img, 0);
+  }
+
+  /** Extract one RGB(A) channel as gray (0=R, 1=G, 2=B). */
+  function imageToChannel(img, channel) {
     const c = document.createElement("canvas");
     c.width = img.naturalWidth;
     c.height = img.naturalHeight;
@@ -682,7 +765,8 @@
     x.drawImage(img, 0, 0);
     const rgba = x.getImageData(0, 0, c.width, c.height).data;
     const gray = new Uint8Array(c.width * c.height);
-    for (let i = 0, j = 0; i < rgba.length; i += 4, j++) gray[j] = rgba[i];
+    const off = Math.max(0, Math.min(2, channel | 0));
+    for (let i = 0, j = 0; i < rgba.length; i += 4, j++) gray[j] = rgba[i + off];
     return { gray, w: c.width, h: c.height };
   }
 
@@ -856,6 +940,102 @@
     if (state.showGraticule) {
       drawGraticule(first, last, dw, dh, rect);
     }
+    if (state.showWindArrows && state.windU && state.windV && state.iw && state.ih) {
+      drawWindArrows(first, last, dw, dh, rect);
+    }
+  }
+
+  function drawWindArrows(first, last, dw, dh, rect) {
+    // Map-anchored samples; image step chosen so on-screen spacing ≈ cell (density stable when zooming).
+    const cell = 30;
+    const len = 12;
+    const uArr = state.windU;
+    const vArr = state.windV;
+    const iw = state.iw;
+    const ih = state.ih;
+    const scale = Math.max(state.scale, 1e-6);
+    const step = Math.max(1, Math.round(cell / scale));
+    let [sMin, sMax] = state.windMeta.gray_scale_speed || [0, 30];
+    if (!(sMax > sMin) || sMax > 200) {
+      const stride = Math.max(1, Math.floor((iw * ih) / 40000));
+      const vals = [];
+      for (let i = 0; i < uArr.length; i += stride) {
+        const s = Math.hypot(uArr[i], vArr[i]);
+        if (s > 1e-4) vals.push(s);
+      }
+      vals.sort((a, b) => a - b);
+      if (vals.length) {
+        sMin = 0;
+        sMax = Math.max(vals[Math.min(vals.length - 1, Math.floor(vals.length * 0.98))], 1e-3);
+        state.windMeta.gray_scale_speed = [sMin, sMax];
+      } else sMax = 30;
+    }
+    const span = Math.max(sMax - sMin, 1e-6);
+
+    // Visible image range (primary wrap); draw on each horizontal wrap copy
+    const yMin = Math.floor((-state.ty) / scale) - step;
+    const yMax = Math.ceil((rect.height - state.ty) / scale) + step;
+    const xMin = Math.floor((-state.tx) / scale) - step;
+    const xMax = Math.ceil((rect.width - state.tx) / scale) + step;
+    const py0 = Math.max(0, Math.floor(yMin / step) * step + (step >> 1));
+    const py1 = Math.min(ih, yMax);
+    const px0 = Math.floor(xMin / step) * step + (step >> 1);
+    const px1 = xMax;
+
+    ctx.save();
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+    for (let py = py0; py < py1; py += step) {
+      for (let px = px0; px < px1; px += step) {
+        const ix = ((Math.floor(px) % iw) + iw) % iw;
+        const i = py * iw + ix;
+        const u = uArr[i];
+        const v = vArr[i];
+        const spd = Math.hypot(u, v);
+        // Hide calm cells (and near-zero encode noise); keep a floor vs legend scale
+        const minSpd = 1.0;
+        if (!(spd >= minSpd)) continue;
+        const t01 = Math.min(1, Math.max(0, (spd - sMin) / span));
+        const col = windSpeedColor(t01);
+        // Stored: +U east, +V south (image). Canvas y also increases south.
+        const ang = Math.atan2(v, u);
+        const ca = Math.cos(ang);
+        const sa = Math.sin(ang);
+        for (let k = first; k <= last; k++) {
+          const sx = state.tx + k * dw + px * scale;
+          const sy = state.ty + py * scale;
+          if (sx < -16 || sx > rect.width + 16 || sy < -16 || sy > rect.height + 16) continue;
+          const x1 = sx - ca * len * 0.35;
+          const y1 = sy - sa * len * 0.35;
+          const x2 = sx + ca * len * 0.65;
+          const y2 = sy + sa * len * 0.65;
+          // dark halo for contrast on any basemap
+          ctx.strokeStyle = "rgba(0,0,0,0.55)";
+          ctx.lineWidth = 2.6;
+          ctx.beginPath();
+          ctx.moveTo(x1, y1);
+          ctx.lineTo(x2, y2);
+          ctx.stroke();
+          ctx.beginPath();
+          ctx.moveTo(x2 - Math.cos(ang + 0.7) * len * 0.42, y2 - Math.sin(ang + 0.7) * len * 0.42);
+          ctx.lineTo(x2, y2);
+          ctx.lineTo(x2 - Math.cos(ang - 0.7) * len * 0.42, y2 - Math.sin(ang - 0.7) * len * 0.42);
+          ctx.stroke();
+          ctx.strokeStyle = col;
+          ctx.lineWidth = 1.35;
+          ctx.beginPath();
+          ctx.moveTo(x1, y1);
+          ctx.lineTo(x2, y2);
+          ctx.stroke();
+          ctx.beginPath();
+          ctx.moveTo(x2 - Math.cos(ang + 0.7) * len * 0.42, y2 - Math.sin(ang + 0.7) * len * 0.42);
+          ctx.lineTo(x2, y2);
+          ctx.lineTo(x2 - Math.cos(ang - 0.7) * len * 0.42, y2 - Math.sin(ang - 0.7) * len * 0.42);
+          ctx.stroke();
+        }
+      }
+    }
+    ctx.restore();
   }
 
   /** Image y for latitude (equirectangular, +90 at top). */
@@ -1014,23 +1194,36 @@
     return rgba;
   }
 
+  function isMonthlyNavLayer(layer) {
+    return (
+      (layer.kind === "temperature" || layer.kind === "pressure") &&
+      typeof layer.monthIndex === "number" &&
+      layer.monthIndex >= 0
+    );
+  }
+
   function isMonthlyTemp(layer) {
     return layer.kind === "temperature" && typeof layer.monthIndex === "number" && layer.monthIndex >= 0;
   }
 
   function updateMonthNav() {
-    const show = isMonthlyTemp(state.layer);
+    const show = isMonthlyNavLayer(state.layer);
     els.monthNav.classList.toggle("show", show);
     if (show) {
       els.monthLabel.textContent = MONTH_NAMES[state.layer.monthIndex];
       els.select.value = state.layer.id;
+      const kindLabel = state.layer.kind === "pressure" ? "气压" : "气温";
+      els.btnPrevMonth.title = `上一月${kindLabel}`;
+      els.btnNextMonth.title = `下一月${kindLabel}`;
     }
   }
 
   async function shiftMonth(delta) {
-    if (!isMonthlyTemp(state.layer)) return;
-    const monthly = LAYERS.filter((l) => typeof l.monthIndex === "number" && l.monthIndex >= 0)
-      .sort((a, b) => a.monthIndex - b.monthIndex);
+    if (!isMonthlyNavLayer(state.layer)) return;
+    const kind = state.layer.kind;
+    const monthly = LAYERS.filter(
+      (l) => l.kind === kind && typeof l.monthIndex === "number" && l.monthIndex >= 0
+    ).sort((a, b) => a.monthIndex - b.monthIndex);
     if (!monthly.length) return;
     const idx = monthly.findIndex((l) => l.id === state.layer.id);
     if (idx < 0) return;
@@ -1061,6 +1254,22 @@
     return t * minElev; // minElev ≤ 0
   }
 
+  function pressureFromGray(g) {
+    const [pMin, pMax] = state.windMeta.gray_scale_pressure_hpa || [980, 1040];
+    return pMin + (g / 255) * (pMax - pMin);
+  }
+
+  /** Wind TOWARD deg: 0°=N, 90°=E. Stored V is image/+south → north = −V. */
+  function windTowardDeg(u, v) {
+    return (((Math.atan2(u, -v) * 180) / Math.PI) + 360) % 360;
+  }
+
+  function formatWindReadout(speed, u, v) {
+    if (speed == null || u == null || v == null) return "—";
+    if (!(speed > 1e-6)) return "0 · —";
+    return `${Math.round(speed)} · ${Math.round(windTowardDeg(u, v))}°`;
+  }
+
   function legendFor(kind) {
     const [tMin, tMax] = state.tempMeta.gray_scale_C;
     const maxElev = state.tempMeta.max_elev_m || 8000;
@@ -1081,6 +1290,16 @@
         left: `深海 (${minElev} m)`,
         right: `高峰 (+${maxElev} m)`,
         note: "0.5 = 海平面；陆地/海洋均为线性：+max_elev_m / min_elev_m。",
+      };
+    }
+    if (kind === "pressure") {
+      const [pMin, pMax] = state.windMeta.gray_scale_pressure_hpa || [980, 1040];
+      return {
+        title: "气压",
+        gradient: LEGEND_CSS.pressure,
+        left: `${pMin.toFixed(0)} hPa`,
+        right: `${pMax.toFixed(0)} hPa`,
+        note: "行星气压带 + 局地热力气压。",
       };
     }
     return {
@@ -1114,10 +1333,15 @@
       ["海拔/水深", sample.isLand ? `+${sample.elevM.toFixed(0)} m` : `−${Math.abs(sample.elevM).toFixed(0)} m`],
       ["温度", sample.tC == null ? "—" : `${sample.tC.toFixed(2)} °C`],
       ["封冻", sample.tC == null ? "—" : (sample.tC <= freezeC ? "是" : "否")],
+      ["气压", sample.pressureHpa == null ? "—" : `${Math.round(sample.pressureHpa)} hPa`],
+      ["风速去向", formatWindReadout(sample.windSpeed, sample.windU, sample.windV)],
       ["颜色", `<span class="swatch" style="background:${swatch}"></span>${swatch}`],
     ];
     const html = rows
-      .map(([k, v]) => `<div class="k">${k}</div><div class="v${k === "温度" || k === "类型" ? " emph" : ""}">${v}</div>`)
+      .map(([k, v]) => {
+        const emph = k === "温度" || k === "类型" || k === "气压" || k === "风速去向";
+        return `<div class="k">${k}</div><div class="v${emph ? " emph" : ""}">${v}</div>`;
+      })
       .join("");
 
     let chart = "";
@@ -1325,6 +1549,26 @@
     const tAnnG = state.tempAnnual ? grayAt(state.tempAnnual, p.x, p.y) : null;
     const tAnnual = tAnnG == null ? null : tempFromGray(tAnnG);
 
+    let pressureHpa = null;
+    let windSpeed = null;
+    let windU = null;
+    let windV = null;
+    if (state.layer.kind === "pressure") {
+      pressureHpa = pressureFromGray(rgba.r);
+    } else {
+      const pMi = typeof mi === "number" && mi >= 0 ? mi : -1;
+      let pg = null;
+      if (pMi >= 0 && state.pressureMonths[pMi]) pg = grayAt(state.pressureMonths[pMi], p.x, p.y);
+      else if (state.pressureAnnual) pg = grayAt(state.pressureAnnual, p.x, p.y);
+      if (pg != null) pressureHpa = pressureFromGray(pg);
+    }
+    const idx = p.y * state.iw + p.x;
+    if (state.windU && state.windV) {
+      windU = state.windU[idx];
+      windV = state.windV[idx];
+      windSpeed = Math.hypot(windU, windV);
+    }
+
     return {
       px: p.x,
       py: p.y,
@@ -1336,17 +1580,31 @@
       tAnnual,
       tMean,
       monthly,
+      pressureHpa,
+      windSpeed,
+      windU,
+      windV,
     };
   }
 
   function updateLegend() {
     const L = legendFor(state.layer.kind);
-    els.legendBody.innerHTML = `
+    let html = `
       <div style="font-family:var(--font-data);font-size:0.78rem;margin-bottom:0.25rem">${L.title}</div>
       <div class="legend-bar" style="background:${L.gradient}"></div>
       <div class="legend-labels"><span>${L.left}</span><span>${L.right}</span></div>
       <div class="legend-note">${L.note}</div>
     `;
+    if (state.showWindArrows && state.hasWindUV) {
+      const [sMin, sMax] = state.windMeta.gray_scale_speed || [0, 30];
+      html += `
+        <div style="font-family:var(--font-data);font-size:0.78rem;margin:0.75rem 0 0.25rem">风速（箭头着色）</div>
+        <div class="legend-bar" style="background:${LEGEND_CSS.wind_speed}"></div>
+        <div class="legend-labels"><span>${sMin.toFixed(1)}</span><span>${sMax.toFixed(1)}</span></div>
+        <div class="legend-note">箭头钉在地图上随平移移动；缩放时屏幕密度大致不变。颜色=风速（高对比）。读数「风速去向」与箭头指向一致（0°北、90°东）。</div>
+      `;
+    }
+    els.legendBody.innerHTML = html;
   }
 
   function updateHoverUI(sample, clientX, clientY) {
@@ -1398,21 +1656,35 @@
         usedCache = true;
       }
     }
+    if (layer.kind === "pressure" && state.dataReady) {
+      const gray =
+        layer.monthIndex >= 0 ? state.pressureMonths[layer.monthIndex] : state.pressureAnnual;
+      if (gray) {
+        state.pixels = grayToRGBA(gray);
+        usedCache = true;
+      }
+    }
 
     if (!usedCache) {
       const img = await loadImage(layer.src);
       state.iw = img.naturalWidth;
       state.ih = img.naturalHeight;
-      const off = document.createElement("canvas");
-      off.width = state.iw;
-      off.height = state.ih;
-      const octx = off.getContext("2d", { willReadFrequently: true });
-      octx.drawImage(img, 0, 0);
-      state.pixels = octx.getImageData(0, 0, state.iw, state.ih).data;
+      if (layer.kind === "pressure") {
+        const { gray } = imageToChannel(img, 2);
+        state.pixels = grayToRGBA(gray);
+      } else {
+        const off = document.createElement("canvas");
+        off.width = state.iw;
+        off.height = state.ih;
+        const octx = off.getContext("2d", { willReadFrequently: true });
+        octx.drawImage(img, 0, 0);
+        state.pixels = octx.getImageData(0, 0, state.iw, state.ih).data;
+      }
     }
 
     state.img = buildDisplayImage();
     if (!keepView) fitView();
+    await syncWindOverlayForLayer(layer);
     draw();
     updateLegend();
     updateMonthNav();
@@ -1422,6 +1694,7 @@
     if (state.showCoast) notes.push("描边");
     if (state.showContours) notes.push("等高线");
     if (state.showGraticule) notes.push("经纬网");
+    if (state.showWindArrows) notes.push("风向");
     setStatus(`${layer.name} · ${state.iw}×${state.ih}${notes.length ? " · " + notes.join(" · ") : ""}`);
   }
 
@@ -1485,7 +1758,143 @@
         }
       }
     }
+
+    state.pressureAnnual = null;
+    state.pressureMonths = Array(12).fill(null);
+    const pressureLayers = LAYERS.filter((l) => l.kind === "pressure");
+    if (pressureLayers.length) {
+      setStatus("加载气压图…");
+      for (const pl of pressureLayers) {
+        try {
+          const img = await loadImage(pl.src);
+          // Pressure is B channel of Wind-UV RGB (U→R V→G P→B)
+          const { gray } = imageToChannel(img, 2);
+          if (pl.monthIndex < 0) state.pressureAnnual = gray;
+          else if (typeof pl.monthIndex === "number") state.pressureMonths[pl.monthIndex] = gray;
+        } catch (_) {
+          /* skip missing */
+        }
+      }
+    }
     state.dataReady = true;
+  }
+
+  function decodeU16Pair(hi, lo, vmin, vmax) {
+    const q = (hi << 8) | lo;
+    return vmin + (q / 65535) * (vmax - vmin);
+  }
+
+  async function loadWindUV(monthIndex = -1) {
+    const key = monthIndex >= 0 ? `m${monthIndex}` : "ann";
+    if (state.windUvKey === key && state.windU && state.windV) return;
+
+    if (state.windUvCache.has(key)) {
+      const hit = state.windUvCache.get(key);
+      state.windU = hit.u;
+      state.windV = hit.v;
+      state.windMeta.gray_scale_speed = hit.speedScale.slice();
+      if (hit.pressureScale) state.windMeta.gray_scale_pressure_hpa = hit.pressureScale.slice();
+      state.windUvKey = key;
+      state.hasWindUV = true;
+      return;
+    }
+
+    let url = WIND_UV_ANN_URL;
+    let speedScale = state.windMeta.gray_scale_speed || [0, 30];
+    let pressureScale = state.windMeta.gray_scale_pressure_hpa || [980, 1040];
+    let uRange = [-40, 40];
+    let vRange = [-40, 40];
+    try {
+      if (!state.windMetaFull) {
+        const resMeta = await fetch(WIND_META_URL, { cache: "no-store" });
+        if (resMeta.ok) state.windMetaFull = await resMeta.json();
+      }
+      const wm = state.windMetaFull;
+      const block =
+        monthIndex >= 0 && Array.isArray(wm?.months) && wm.months[monthIndex]
+          ? wm.months[monthIndex]
+          : wm?.annual;
+      if (block) {
+        if (block.gray_scale_pressure_hpa) pressureScale = block.gray_scale_pressure_hpa;
+        if (block.gray_scale_speed) speedScale = block.gray_scale_speed;
+        if (block.uv_scale?.u) uRange = block.uv_scale.u;
+        if (block.uv_scale?.v) vRange = block.uv_scale.v;
+        if (block.files?.uv) url = `../graphs/wind/${block.files.uv}`;
+      }
+    } catch (_) { /* defaults */ }
+
+    let img;
+    try {
+      img = await loadImage(url);
+    } catch (_) {
+      if (monthIndex >= 0) {
+        await loadWindUV(-1);
+        return;
+      }
+      throw new Error(`无法加载风场 UV: ${url}`);
+    }
+    if (img.naturalWidth !== state.iw || img.naturalHeight !== state.ih) {
+      throw new Error(`风场 UV 尺寸 ${img.naturalWidth}×${img.naturalHeight} ≠ ${state.iw}×${state.ih}`);
+    }
+    const c = document.createElement("canvas");
+    c.width = state.iw;
+    c.height = state.ih;
+    const x = c.getContext("2d", { willReadFrequently: true });
+    x.drawImage(img, 0, 0);
+    const rgba = x.getImageData(0, 0, state.iw, state.ih).data;
+    const n = state.iw * state.ih;
+    const u = new Float32Array(n);
+    const v = new Float32Array(n);
+    const [uMin, uMax] = uRange;
+    const [vMin, vMax] = vRange;
+    // RGB8: U→R, V→G, pressure→B
+    for (let i = 0, j = 0; i < n; i++, j += 4) {
+      u[i] = uMin + (rgba[j] / 255) * (uMax - uMin);
+      v[i] = vMin + (rgba[j + 1] / 255) * (vMax - vMin);
+    }
+    let sMax = speedScale[1];
+    if (!(sMax > 0) || sMax > 200) {
+      const stride = Math.max(1, Math.floor(n / 40000));
+      const vals = [];
+      for (let i = 0; i < n; i += stride) {
+        const s = Math.hypot(u[i], v[i]);
+        if (s > 1e-4) vals.push(s);
+      }
+      vals.sort((a, b) => a - b);
+      sMax = vals.length
+        ? Math.max(vals[Math.min(vals.length - 1, Math.floor(vals.length * 0.98))], 1e-3)
+        : 30;
+      speedScale = [0, sMax];
+    }
+    state.windUvCache.set(key, {
+      u,
+      v,
+      speedScale: speedScale.slice(),
+      pressureScale: pressureScale.slice(),
+    });
+    state.windU = u;
+    state.windV = v;
+    state.windMeta.gray_scale_speed = speedScale.slice();
+    state.windMeta.gray_scale_pressure_hpa = pressureScale.slice();
+    state.windUvKey = key;
+    state.hasWindUV = true;
+  }
+
+  function windMonthIndexForLayer(layer) {
+    if (!layer) return -1;
+    if (typeof layer.monthIndex === "number" && layer.monthIndex >= 0) return layer.monthIndex;
+    return -1;
+  }
+
+  async function syncWindOverlayForLayer(layer) {
+    if (!state.hasWindUV && !state.showWindArrows) return;
+    const mi = windMonthIndexForLayer(layer);
+    try {
+      await loadWindUV(mi);
+      updateLegend();
+    } catch (e) {
+      setStatus(String(e.message || e), true);
+    }
   }
 
   // --- events ---
@@ -1523,6 +1932,18 @@
   els.contourToggle.addEventListener("change", () => {
     state.showContours = els.contourToggle.checked;
     draw();
+  });
+
+  els.windArrowToggle.addEventListener("change", () => {
+    state.showWindArrows = els.windArrowToggle.checked;
+    updateLegend();
+    if (state.showWindArrows) {
+      syncWindOverlayForLayer(state.layer)
+        .then(() => draw())
+        .catch((e) => setStatus(String(e.message || e), true));
+    } else {
+      draw();
+    }
   });
 
   els.btnReset.addEventListener("click", () => {
@@ -1638,11 +2059,24 @@
       const lab = els.contourToggle.closest("label");
       if (lab) lab.style.display = "none";
     }
+    if (state.hasWindUV || state.hasPressure) {
+      try {
+        await loadWindUV(windMonthIndexForLayer(state.layer));
+      } catch (_) {
+        state.hasWindUV = false;
+      }
+    }
+    if (!state.hasWindUV && els.windArrowToggle) {
+      const lab = els.windArrowToggle.closest("label");
+      if (lab) lab.style.display = "none";
+    }
     updateLegend();
     await loadLayer(state.layer);
     const bits = [];
     if (!state.hasSatellite) bits.push("无卫星图");
     if (!state.hasTemps) bits.push("无气温层");
+    if (!state.hasPressure) bits.push("无气压层");
+    if (!state.hasWindUV) bits.push("无风向");
     setStatus(
       `${state.layer.name} · ${state.iw}×${state.ih} · 数据就绪` +
         (bits.length ? ` · ${bits.join(" · ")}` : "")

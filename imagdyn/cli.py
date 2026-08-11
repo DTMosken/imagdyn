@@ -86,6 +86,20 @@ def _cmd_currents(args: argparse.Namespace) -> int:
     return int(currents_main(argv_rest))
 
 
+def _cmd_wind(args: argparse.Namespace) -> int:
+    argv_rest = list(args.wind_argv or [])
+    if argv_rest and argv_rest[0] == "--":
+        argv_rest = argv_rest[1:]
+    try:
+        from .wind import main as wind_main
+    except (ImportError, ModuleNotFoundError) as e:
+        from .envutil import format_missing_dep
+
+        print(format_missing_dep(e, lang="zh"), file=sys.stderr)
+        return 1
+    return int(wind_main(argv_rest))
+
+
 def _cmd_summarize(_: argparse.Namespace) -> int:
     try:
         from .summarize import main as summarize_main
@@ -268,6 +282,14 @@ def _cmd_pipeline(args: argparse.Namespace) -> int:
                 summarize_main()
         else:
             print("Skip summarize (no temperature maps). Pass --temperature to generate.")
+    if getattr(args, "wind", False) and not args.temperature:
+        try:
+            from .wind import main as wind_main
+        except (ImportError, ModuleNotFoundError) as e:
+            print(format_missing_dep(e, lang="zh"), file=sys.stderr)
+            return 1
+        with wall.step("wind"):
+            wind_main([])
     print_status()
     print(
         f"pipeline: {len(wall.steps)} stages  "
@@ -334,7 +356,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sp.set_defaults(func=_cmd_currents)
 
-    sp = sub.add_parser("summarize", help="Write temperature_stats.json")
+    sp = sub.add_parser("wind", help="Generate wind / pressure fields from temperature")
+    sp.add_argument(
+        "wind_argv",
+        nargs=argparse.REMAINDER,
+        help="Args forwarded to imagdyn.wind (e.g. --cpu --annual-only)",
+    )
+    sp.set_defaults(func=_cmd_wind)
+
+    sp = sub.add_parser(
+        "summarize",
+        help="Write temperature_stats.json and wind_stats.json (incl. waterworld 1D)",
+    )
     sp.set_defaults(func=_cmd_summarize)
 
     sp = sub.add_parser("viewer", help="Serve project root and open the map viewer")
@@ -348,6 +381,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--no-template", action="store_true")
     sp.add_argument("--reshape", action="store_true", help="Also run reshape before contours")
     sp.add_argument("--temperature", action="store_true", help="Also generate temperatures")
+    sp.add_argument("--wind", action="store_true", help="Also generate wind/pressure (needs temperatures)")
     sp.set_defaults(func=_cmd_pipeline)
 
     return p
@@ -385,6 +419,8 @@ def main(argv: list[str] | None = None) -> int:
         args.temp_argv = args.temp_argv[1:]
     if args.command == "currents" and args.currents_argv and args.currents_argv[0] == "--":
         args.currents_argv = args.currents_argv[1:]
+    if args.command == "wind" and args.wind_argv and args.wind_argv[0] == "--":
+        args.wind_argv = args.wind_argv[1:]
     func: Callable[[argparse.Namespace], int] = args.func
     return int(func(args))
 

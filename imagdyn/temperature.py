@@ -198,6 +198,95 @@ def kernel_radius_px(
     return ry, rx
 
 
+def small_inland_lake_mask(
+    land: torch.Tensor | np.ndarray,
+    *,
+    planet_radius_km: float = 6371.0,
+    max_area_km2: float = 20_000.0,
+) -> torch.Tensor:
+    """
+    True on water cells that belong to inland lakes smaller than ``max_area_km2``.
+
+    Water connected components (8-neighbour, longitude wraps). The largest
+    component is treated as the world ocean; any other component whose
+    equatorial-pixel-equivalent area is ≤ ``max_area_km2`` is a small inland lake.
+    """
+    from scipy import ndimage
+
+    if isinstance(land, torch.Tensor):
+        device = land.device
+        land_np = land.detach().cpu().numpy().astype(bool)
+    else:
+        device = torch.device("cpu")
+        land_np = np.asarray(land, dtype=bool)
+
+    water = ~land_np
+    h, w = water.shape
+    if not water.any():
+        return torch.zeros((h, w), device=device, dtype=torch.bool)
+
+    struct = ndimage.generate_binary_structure(2, 2)
+    labeled, nlab = ndimage.label(water, structure=struct)
+    if nlab == 0:
+        return torch.zeros((h, w), device=device, dtype=torch.bool)
+
+    # Merge labels that touch across the antimeridian (lon wrap).
+    left = labeled[:, 0]
+    right = labeled[:, -1]
+    touch = (left > 0) & (right > 0) & (left != right)
+    if np.any(touch):
+        parent = np.arange(nlab + 1, dtype=np.int32)
+
+        def find(x: int) -> int:
+            while parent[x] != x:
+                parent[x] = parent[parent[x]]
+                x = int(parent[x])
+            return x
+
+        for a, b in zip(left[touch].tolist(), right[touch].tolist()):
+            ra, rb = find(int(a)), find(int(b))
+            if ra != rb:
+                parent[rb] = ra
+        remap = np.zeros(nlab + 1, dtype=np.int32)
+        for i in range(1, nlab + 1):
+            remap[i] = find(i)
+        # Reindex to 1..K
+        uniq = {0: 0}
+        next_id = 1
+        for i in range(1, nlab + 1):
+            r = int(remap[i])
+            if r not in uniq:
+                uniq[r] = next_id
+                next_id += 1
+            remap[i] = uniq[r]
+        labeled = remap[labeled]
+        nlab = next_id - 1
+
+    counts = np.bincount(labeled.ravel(), minlength=nlab + 1)
+    counts[0] = 0
+    if nlab == 0 or counts.max() == 0:
+        return torch.zeros((h, w), device=device, dtype=torch.bool)
+
+    ocean_id = int(np.argmax(counts))
+    # Equatorial pixel area (km²); conservative upper bound on true cell area.
+    km_per_deg = (np.pi * float(planet_radius_km)) / 180.0
+    dy_km = (180.0 / h) * km_per_deg
+    dx_eq = (360.0 / w) * km_per_deg
+    px_km2 = float(dy_km * dx_eq)
+    max_px = max(1, int(float(max_area_km2) / max(px_km2, 1e-6)))
+
+    small_ids = [
+        i
+        for i in range(1, nlab + 1)
+        if i != ocean_id and 0 < int(counts[i]) <= max_px
+    ]
+    if not small_ids:
+        return torch.zeros((h, w), device=device, dtype=torch.bool)
+
+    mask_np = np.isin(labeled, np.asarray(small_ids, dtype=np.int32))
+    return torch.as_tensor(mask_np, device=device, dtype=torch.bool)
+
+
 def diffuse_ocean_influence(
     open_water: torch.Tensor,
     lat: torch.Tensor,
@@ -402,6 +491,8 @@ def synthesize_temperatures(
     ocean_sst_nudge: float = 0.55,
     maritime_iters: int = 2,
     maritime_diffuse_passes: int = 6,
+    lake_inertia: float = 0.60,
+    lake_max_area_km2: float = 20_000.0,
     currents: bool = True,
     current_warm_delta_C: float = 4.5,
     current_cold_delta_C: float = -4.5,
@@ -451,6 +542,8 @@ def synthesize_temperatures(
             ocean_sst_nudge=ocean_sst_nudge,
             maritime_iters=maritime_iters,
             maritime_diffuse_passes=maritime_diffuse_passes,
+            lake_inertia=lake_inertia,
+            lake_max_area_km2=lake_max_area_km2,
             currents=currents,
             current_warm_delta_C=current_warm_delta_C,
             current_cold_delta_C=current_cold_delta_C,
@@ -493,6 +586,8 @@ def _synthesize_temperatures_impl(
     ocean_sst_nudge: float,
     maritime_iters: int,
     maritime_diffuse_passes: int,
+    lake_inertia: float,
+    lake_max_area_km2: float,
     currents: bool,
     current_warm_delta_C: float,
     current_cold_delta_C: float,
@@ -510,6 +605,13 @@ def _synthesize_temperatures_impl(
     elev_m = torch.where(land, (elev - 0.5) / 0.5 * max_elev_m, torch.zeros_like(elev))
     elev_m = elev_m.clamp(0.0, max_elev_m)
     lapse_raw = lapse_k_per_km * (elev_m / 1000.0)
+
+    small_lake = small_inland_lake_mask(
+        land,
+        planet_radius_km=planet_radius_km,
+        max_area_km2=lake_max_area_km2,
+    )
+    lake_inertia_f = float(np.clip(lake_inertia, 0.0, 0.97))
 
     ry_s, rx_s = kernel_radius_px(h, w, max(25.0, coast_blend_km * 0.4), planet_radius_km)
     land_soft = box_filter_wrap_lon(land.float(), ry_s, rx_s).clamp(0.0, 1.0)
@@ -623,6 +725,9 @@ def _synthesize_temperatures_impl(
             sens = sens * (1.0 - 0.75 * polar_w * water_soft)
             inertia = land_inertia + (ocean_inertia - land_inertia) * maritime
             inertia = torch.clamp(inertia + 0.08 * polar_w * water_soft, 0.0, 0.97)
+            # Small inland lakes: lower thermal inertia than deep ocean
+            if bool(small_lake.any()):
+                inertia = torch.where(small_lake, torch.full_like(inertia, lake_inertia_f), inertia)
 
             dq = q_months[m] - q_annual
             d_t = sens * dq * (1.0 - 0.55 * inertia)
@@ -704,6 +809,9 @@ def _synthesize_temperatures_impl(
         "maritime_iters": maritime_iters,
         "maritime_model": "gpu_diffusion",
         "maritime_diffuse_passes": maritime_diffuse_passes,
+        "lake_inertia": lake_inertia_f,
+        "lake_max_area_km2": float(lake_max_area_km2),
+        "small_inland_lake_pct": float(100.0 * small_lake.float().mean().item()),
         "ocean_currents": currents_meta,
         "timing": timing,
     }
@@ -721,6 +829,7 @@ def _synthesize_temperatures_impl(
         lapse_raw,
         land_soft,
         water_soft,
+        small_lake,
         q_months,
         sst_targets,
         q_annual,
@@ -806,6 +915,18 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument("--ocean-inertia", type=float, default=0.90)
     p.add_argument("--land-inertia", type=float, default=0.28)
+    p.add_argument(
+        "--lake-inertia",
+        type=float,
+        default=0.60,
+        help="Thermal inertia on small inland lakes (default 0.6; open ocean uses --ocean-inertia)",
+    )
+    p.add_argument(
+        "--lake-max-area-km2",
+        type=float,
+        default=20_000.0,
+        help="Max connected inland-water area (km²) treated as a small lake",
+    )
     p.add_argument("--continentality-amp", type=float, default=1.2)
     p.add_argument(
         "--coast-blend-km",
@@ -843,6 +964,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--save-npy", action="store_true")
     p.add_argument("--downsample", type=int, default=1)
     p.add_argument("--cpu", action="store_true", help="Force CPU even if CUDA is available")
+    p.add_argument(
+        "--wind",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="After temperature, synthesize wind/pressure from T tensors (default: on)",
+    )
     return p.parse_args()
 
 
@@ -914,6 +1041,8 @@ def main() -> None:
             ocean_sst_nudge=args.ocean_sst_nudge,
             maritime_iters=args.maritime_iters,
             maritime_diffuse_passes=args.maritime_diffuse_passes,
+            lake_inertia=args.lake_inertia,
+            lake_max_area_km2=args.lake_max_area_km2,
             currents=bool(args.currents),
             current_warm_delta_C=args.current_warm_c,
             current_cold_delta_C=args.current_cold_c,
@@ -921,9 +1050,6 @@ def main() -> None:
             current_lat_sigma_deg=args.current_lat_sigma,
             current_reach_km=args.current_reach_km,
         )
-    # Input rasters no longer needed; keep only numpy outputs for write-out
-    del elev, land
-    release_torch_memory()
 
     out = args.out_dir
     out.mkdir(parents=True, exist_ok=True)
@@ -968,6 +1094,30 @@ def main() -> None:
         with open(out / "temperature_meta.json", "w", encoding="utf-8") as f:
             json.dump(meta_out, f, indent=2)
             f.write("\n")
+
+    if args.wind:
+        from .wind import WindField, elev01_to_meters, synthesize_wind_maps
+
+        with wall.step("wind"):
+            print("Wind from temperature tensors…", flush=True)
+            elev_m = elev01_to_meters(elev, land, max_elev_m=args.max_elev_m)
+            synthesize_wind_maps(
+                monthly,
+                annual,
+                land,
+                elev_m,
+                device=device,
+                wind=WindField(
+                    t_spin_s=24.0 * 3600.0,
+                    planet_radius_km=args.radius_km,
+                    lapse_k_per_km=args.lapse,
+                ),
+            )
+
+    # Input rasters no longer needed
+    del elev, land
+    release_torch_memory()
+
     meta_out["wall_timing"] = wall.as_meta()
     with open(out / "temperature_meta.json", "w", encoding="utf-8") as f:
         json.dump(meta_out, f, indent=2)

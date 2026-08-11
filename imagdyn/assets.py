@@ -25,11 +25,21 @@ class AssetStatus:
     temperature_annual: bool = False
     temperature_meta: bool = False
     temperature_months: list[bool] | None = None
+    pressure_annual: bool = False
+    wind_meta: bool = False
+    wind_stats: bool = False
+    wind_uv: bool = False
+    pressure_months: list[bool] | None = None
+    wind_uv_months: list[bool] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)
         if self.temperature_months is None:
             d["temperature_months"] = [False] * 12
+        if self.pressure_months is None:
+            d["pressure_months"] = [False] * 12
+        if self.wind_uv_months is None:
+            d["wind_uv_months"] = [False] * 12
         return d
 
 
@@ -39,9 +49,8 @@ def _exists(name: str, base: Path = paths.GRAPHS) -> bool:
 
 def probe_assets(graphs: Path | None = None) -> AssetStatus:
     g = graphs or paths.GRAPHS
-    months = [_exists(n, g / "temperature") if (g / "temperature").is_dir() else False for n in paths.MONTH_TEMP_NAMES]
-    # Also allow temp files directly under temperature dir via paths
     temp = g / "temperature"
+    wind = g / "wind"
     return AssetStatus(
         full_elevation=_exists(paths.FULL_ELEV, g),
         land_mask=_exists(paths.LAND_MASK, g),
@@ -52,6 +61,12 @@ def probe_assets(graphs: Path | None = None) -> AssetStatus:
         temperature_annual=(temp / paths.TEMP_ANNUAL).is_file(),
         temperature_meta=(temp / paths.TEMP_META).is_file(),
         temperature_months=[(temp / n).is_file() for n in paths.MONTH_TEMP_NAMES],
+        pressure_annual=(wind / paths.WIND_UV_ANNUAL).is_file(),
+        wind_meta=(wind / paths.WIND_META).is_file(),
+        wind_stats=(wind / paths.WIND_STATS).is_file(),
+        wind_uv=(wind / paths.WIND_UV_ANNUAL).is_file(),
+        pressure_months=[(wind / n).is_file() for n in paths.MONTH_WIND_UV_NAMES],
+        wind_uv_months=[(wind / n).is_file() for n in paths.MONTH_WIND_UV_NAMES],
     )
 
 
@@ -73,6 +88,14 @@ def write_assets_json(status: AssetStatus | None = None, graphs: Path | None = N
             "temperature_annual": f"temperature/{paths.TEMP_ANNUAL}",
             "temperature_meta": f"temperature/{paths.TEMP_META}",
             "temperature_months": [f"temperature/{n}" for n in paths.MONTH_TEMP_NAMES],
+            "wind_dir": "wind",
+            "pressure_annual": f"wind/{paths.WIND_UV_ANNUAL}",
+            "wind_meta": f"wind/{paths.WIND_META}",
+            "wind_stats": f"wind/{paths.WIND_STATS}",
+            "wind_uv_annual": f"wind/{paths.WIND_UV_ANNUAL}",
+            "wind_terrain_dot_annual": f"wind/{paths.WIND_TERRAIN_DOT_ANNUAL}",
+            "pressure_months": [f"wind/{n}" for n in paths.MONTH_WIND_UV_NAMES],
+            "wind_uv_months": [f"wind/{n}" for n in paths.MONTH_WIND_UV_NAMES],
         },
     }
     out.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
@@ -159,6 +182,8 @@ def ensure_derived_terrain(
 def print_status(status: AssetStatus | None = None) -> None:
     st = status or probe_assets()
     months = st.temperature_months or [False] * 12
+    p_months = st.pressure_months or [False] * 12
+    uv_months = st.wind_uv_months or [False] * 12
     rows = [
         ("Full Elevation", st.full_elevation),
         ("Land Mask", st.land_mask),
@@ -169,6 +194,10 @@ def print_status(status: AssetStatus | None = None) -> None:
         ("Temperature annual", st.temperature_annual),
         ("Temperature meta", st.temperature_meta),
         (f"Temperature months ({sum(months)}/12)", all(months)),
+        ("Pressure annual", st.pressure_annual),
+        ("Wind UV / meta", st.wind_uv and st.wind_meta),
+        (f"Pressure months ({sum(p_months)}/12)", all(p_months)),
+        (f"Wind UV months ({sum(uv_months)}/12)", all(uv_months)),
     ]
     print("=== IMagDyn assets ===")
     for name, ok in rows:
