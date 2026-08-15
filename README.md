@@ -1,6 +1,8 @@
 # IMagDyn
 
-自定义地图的**交互式气候与风场工具**：从灰度全海拔生成海陆遮罩、等高线、月/年均气温与气压风场，并在浏览器中查看。
+*[English](README.en.md) | 中文*
+
+自定义地图的**交互式气候与风场工具**：从灰度高程图生成海陆遮罩、等高线、月/年均气温与气压风场，并在浏览器中查看。
 
 | | |
 |--|--|
@@ -8,7 +10,7 @@
 | Python 包 | `imagdyn` |
 | 入口 | `IMagDyn.cmd`（Windows）· `IMagDyn.sh`（Unix） |
 
-典型流程：放入或播种全海拔图 → `ensure` / `contours` → `temperature`（默认同步风场）→ `viewer`。
+典型流程：放入或播种高程图 → `ensure` / `contours` → `temperature`（默认同步风场）→ `viewer`。
 
 ---
 
@@ -87,7 +89,7 @@ python -m pytest
 | 键 | 功能 |
 |----|------|
 | 1 | `status` — 检查资源，写入 `graphs/assets.json` |
-| 2 | `ensure` — 从全海拔派生 Land Mask / Above / Below（可从 `graphs/template/` 播种） |
+| 2 | `ensure` — 从高程图派生 Land Mask / Above / Below（可从 `graphs/template/` 播种） |
 | 3 | `contours` — 陆地等高线 |
 | 4 | `temperature` — 12 月 + 年均气温（默认同步风场；`--no-wind` 可关） |
 | 5 | `wind` — 风场 / 气压（读取已有气温图） |
@@ -176,7 +178,7 @@ Full Elevation → ensure / contours
 
 | 主题 | 简述 | 详情 |
 |------|--------|------|
-| 数据格式 | 海拔灰度、气温 gray、风场 RGB 打包与 JSON 元数据 | [docs/data-formats.md](docs/data-formats.md) |
+| 数据格式 | 高程、气温、风场与 JSON 元数据 | [docs/data-formats.md](docs/data-formats.md) |
 | 气温 | TOA 日均辐射、热扩散海事缓冲、小湖惯性、洋流 SST | [docs/temperature.md](docs/temperature.md) |
 | 风场 / 气压 | 36 经度扇区余弦气压带、瑞利 AMC 副高、二次方阻力 | [docs/wind.md](docs/wind.md) |
 | Viewer | 本地静态服务、图层与风箭头、读数钉点 | [docs/viewer.md](docs/viewer.md) |

@@ -1,5 +1,7 @@
 # 风场与气压
 
+*[English](wind.en.md) | 中文*
+
 模块：[`imagdyn/wind.py`](../imagdyn/wind.py)。
 
 ## 流程概要

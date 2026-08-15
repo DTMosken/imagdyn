@@ -1,8 +1,10 @@
 # 数据格式
 
+*[English](data-formats.en.md) | 中文*
+
 IMagDyn 读写的主要栅格与 JSON 约定。
 
-## 全海拔 `graphs/Terrain - Full Elevation.png`
+## 高程图 `graphs/Terrain - Full Elevation.png`
 
 单通道灰度，**0.5**（约 gray 128）= 海平面：
 

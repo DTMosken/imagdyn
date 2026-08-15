@@ -45,7 +45,7 @@
     header {
       display: flex;
       align-items: center;
-      gap: 1.25rem;
+      gap: 0.85rem 1.1rem;
       padding: 0.75rem 1.25rem;
       border-bottom: 1px solid var(--panel-edge);
       background: rgba(18, 22, 28, 0.85);
@@ -66,8 +66,9 @@
       display: flex;
       flex-wrap: wrap;
       align-items: center;
-      gap: 0.75rem 1rem;
+      gap: 0.65rem 0.85rem;
       flex: 1;
+      min-width: 0;
     }
 
     label.ctrl {
@@ -106,12 +107,65 @@
 
     .toggle input { accent-color: var(--accent); width: 1rem; height: 1rem; }
 
+    .header-end {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+      margin-left: auto;
+      flex-shrink: 0;
+    }
+
     .hint {
       font-family: var(--font-data);
       font-size: 0.7rem;
       color: var(--muted);
-      margin-left: auto;
       white-space: nowrap;
+    }
+
+    #btnLang {
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      color: #12161c;
+      background: var(--accent);
+      border-color: var(--accent);
+      min-width: 3.6rem;
+      text-align: center;
+    }
+
+    #btnLang:hover {
+      background: #e0b88a;
+      border-color: #e0b88a;
+    }
+
+    html[lang="en"] header {
+      gap: 0.65rem 0.85rem;
+    }
+
+    html[lang="en"] .controls {
+      gap: 0.5rem 0.7rem;
+    }
+
+    html[lang="en"] label.ctrl {
+      font-size: 0.66rem;
+      letter-spacing: 0.02em;
+    }
+
+    html[lang="en"] select,
+    html[lang="en"] button {
+      font-size: 0.72rem;
+    }
+
+    html[lang="en"] select { min-width: 13.5rem; }
+
+    html[lang="en"] .hint {
+      font-size: 0.62rem;
+      max-width: 16.5rem;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    html[lang="en"] #btnLang {
+      font-size: 0.8rem;
     }
 
     main {
@@ -350,6 +404,10 @@
       margin-right: 0.35rem;
     }
 
+    @media (max-width: 1100px) {
+      html[lang="en"] .hint { display: none; }
+    }
+
     @media (max-width: 720px) {
       main { grid-template-columns: 1fr; grid-template-rows: 1fr auto; }
       .side {
@@ -358,7 +416,10 @@
         border-left: none;
         border-top: 1px solid var(--panel-edge);
       }
+      header { flex-wrap: wrap; }
+      .controls { flex-basis: 100%; }
       .hint { display: none; }
+      .header-end { margin-left: auto; }
       select { min-width: 12rem; }
     }
   </style>
@@ -367,32 +428,35 @@
   <header>
     <div class="brand">IMagDyn <span>Maps</span></div>
     <div class="controls">
-      <label class="ctrl">图层
+      <label class="ctrl"><span data-i18n="layer">图层</span>
         <select id="layerSelect" aria-label="选择图层"></select>
       </label>
-      <label class="toggle ctrl" title="对地形/气温灰度图套用色阶显示">
+      <label class="toggle ctrl" data-i18n-title="colorScaleTitle" title="对地形/气温灰度图套用色阶显示">
         <input type="checkbox" id="colorScaleToggle" checked />
-        色阶
+        <span data-i18n="colorScale">色阶</span>
       </label>
-      <label class="toggle ctrl" title="叠加经纬网；赤道 / 回归线 / 极圈加粗">
+      <label class="toggle ctrl" data-i18n-title="graticuleTitle" title="叠加经纬网；赤道 / 回归线 / 极圈加粗">
         <input type="checkbox" id="graticuleToggle" />
-        经纬度
+        <span data-i18n="graticule">经纬度</span>
       </label>
-      <label class="toggle ctrl" title="用 Land Mask 描边陆地边界">
+      <label class="toggle ctrl" data-i18n-title="coastTitle" title="用 Land Mask 描边陆地边界">
         <input type="checkbox" id="coastToggle" checked />
-        陆地描边
+        <span data-i18n="coast">陆地描边</span>
       </label>
-      <label class="toggle ctrl" title="叠加等高线">
+      <label class="toggle ctrl" data-i18n-title="contourTitle" title="叠加等高线">
         <input type="checkbox" id="contourToggle" />
-        等高线
+        <span data-i18n="contours">等高线</span>
       </label>
-      <label class="toggle ctrl" title="叠加风向箭头（需 graphs/wind UV）">
+      <label class="toggle ctrl" data-i18n-title="windTitle" title="叠加风向箭头（需 graphs/wind UV）">
         <input type="checkbox" id="windArrowToggle" />
-        风向
+        <span data-i18n="wind">风向</span>
       </label>
-      <button type="button" id="btnReset" title="重置视图">重置视图</button>
-      <button type="button" id="btnClearPin" title="清除固定点">清除固定</button>
-      <div class="hint">滚轮缩放 · 中键/右键拖拽 · 悬停读数 · 单击固定</div>
+      <button type="button" id="btnReset" data-i18n="reset" data-i18n-title="resetTitle" title="重置视图">重置视图</button>
+      <button type="button" id="btnClearPin" data-i18n="clearPin" data-i18n-title="clearPinTitle" title="清除固定点">清除固定</button>
+    </div>
+    <div class="header-end">
+      <div class="hint" data-i18n="hint">滚轮缩放 · 中键/右键拖拽 · 悬停读数 · 单击固定</div>
+      <button type="button" id="btnLang" data-i18n="langBtn" data-i18n-title="langBtnTitle" title="Switch to English">EN</button>
     </div>
   </header>
 
@@ -403,24 +467,24 @@
         <div class="h"></div><div class="v"></div><div class="dot"></div>
       </div>
       <div class="pin-marker" id="pinMarker"></div>
-      <div class="month-nav" id="monthNav" aria-label="月份切换">
-        <button type="button" id="btnPrevMonth" title="上个月">‹ 上月</button>
+      <div class="month-nav" id="monthNav" data-i18n-aria="monthNavAria" aria-label="月份切换">
+        <button type="button" id="btnPrevMonth" data-i18n-title="prevMonthTitle" title="上个月">‹ <span data-i18n="prevMonth">上月</span></button>
         <div class="month-label" id="monthLabel">—</div>
-        <button type="button" id="btnNextMonth" title="下个月">下月 ›</button>
+        <button type="button" id="btnNextMonth" data-i18n-title="nextMonthTitle" title="下个月"><span data-i18n="nextMonth">下月</span> ›</button>
       </div>
     </div>
 
     <aside class="side">
       <div class="card" id="hoverCard">
-        <h2>悬停</h2>
+        <h2 data-i18n="hover">悬停</h2>
         <div id="hoverData" class="empty">将鼠标移到地图上</div>
       </div>
       <div class="card pinned" id="pinCard">
-        <h2>固定点</h2>
+        <h2 data-i18n="pin">固定点</h2>
         <div id="pinData" class="empty">单击地图以固定读数</div>
       </div>
       <div class="card" id="legendCard">
-        <h2>图例</h2>
+        <h2 data-i18n="legend">图例</h2>
         <div id="legendBody"></div>
       </div>
       <div class="status" id="status">准备加载…</div>
@@ -438,10 +502,303 @@
   const SAT_URL = "../graphs/Satellite Color.png";
   const WIND_UV_ANN_URL = "../graphs/wind/Wind - UV - Annual Mean.png";
 
-  const MONTH_NAMES = [
-    "January | 1", "February | 2", "March | 3", "April | 4", "May | 5", "June | 6",
-    "July | 7", "August | 8", "September | 9", "October | 10", "November | 11", "December | 12",
+  const MONTH_NAMES_EN = [
+    "January", "February", "March", "April", "May", "June",
+    "July", "August", "September", "October", "November", "December",
   ];
+  const MONTH_NAMES_ZH = [
+    "1月", "2月", "3月", "4月", "5月", "6月",
+    "7月", "8月", "9月", "10月", "11月", "12月",
+  ];
+  /** English month names used in on-disk PNG filenames. */
+  const MONTH_NAMES = MONTH_NAMES_EN.map((n, i) => `${n} | ${i + 1}`);
+
+  const I18N = {
+    zh: {
+      layer: "图层",
+      layerSelectAria: "选择图层",
+      colorScale: "色阶",
+      colorScaleTitle: "对地形/气温灰度图套用色阶显示",
+      graticule: "经纬度",
+      graticuleTitle: "叠加经纬网；赤道 / 回归线 / 极圈加粗",
+      coast: "陆地描边",
+      coastTitle: "用 Land Mask 描边陆地边界",
+      contours: "等高线",
+      contourTitle: "叠加等高线",
+      wind: "风向",
+      windTitle: "叠加风向箭头（需 graphs/wind UV）",
+      reset: "重置视图",
+      resetTitle: "重置视图",
+      clearPin: "清除固定",
+      clearPinTitle: "清除固定点",
+      hint: "滚轮缩放 · 中键/右键拖拽 · 悬停读数 · 单击固定",
+      langBtn: "EN",
+      langBtnTitle: "Switch to English",
+      monthNavAria: "月份切换",
+      prevMonth: "上月",
+      nextMonth: "下月",
+      prevMonthTitle: "上个月",
+      nextMonthTitle: "下个月",
+      prevKind: "上一月{kind}",
+      nextKind: "下一月{kind}",
+      kindTemp: "气温",
+      kindPres: "气压",
+      hover: "悬停",
+      pin: "固定点",
+      legend: "图例",
+      statusReady: "准备加载…",
+      hoverMove: "将鼠标移到地图上",
+      hoverOob: "超出图像范围",
+      pinHint: "单击地图以固定读数",
+      loading: "加载中…",
+      detecting: "检测可用图层…",
+      noLayers: "没有可用图层（至少需要 Terrain - Full Elevation.png）",
+      loadLayer: "加载 {name}…",
+      loadElev: "加载海拔 / Land Mask…",
+      noMask: "未找到 Land Mask，已从高程图推导海陆",
+      loadContours: "加载等高线叠加…",
+      loadTemps: "加载气温图…",
+      loadPressure: "加载气压图…",
+      dataReady: "数据就绪",
+      noSat: "无卫星图",
+      noTemp: "无气温层",
+      noPres: "无气压层",
+      noWind: "无风向",
+      noteColor: "色阶",
+      noteCoast: "描边",
+      noteContours: "等高线",
+      noteGraticule: "经纬网",
+      noteWind: "风向",
+      groupBase: "底图",
+      groupTerrain: "地形",
+      groupTemperature: "气温",
+      groupAtmosphere: "大气",
+      layerSat: "卫星真彩",
+      layerElev: "地形 — 高程图",
+      layerTempAnn: "气温 — 年平均",
+      layerTempMonth: "气温 — {mm} {month}",
+      layerPresAnn: "气压 — 年平均",
+      layerPresMonth: "气压 — {mm} {month}",
+      lat: "纬度",
+      lon: "经度",
+      type: "类型",
+      land: "陆地",
+      ocean: "海洋",
+      elev: "海拔/水深",
+      temp: "温度",
+      frozen: "封冻",
+      yes: "是",
+      no: "否",
+      pressure: "气压",
+      windToward: "风速去向",
+      color: "颜色",
+      chartTitle: "年温度变化 · 均温 {mean}（虚线）",
+      legendTemp: "气温",
+      legendTempNote: "海陆类型由 Land Mask 判定；封冻：温度 ≤ 0 °C。",
+      legendElev: "全海拔",
+      legendDeep: "深海 ({m} m)",
+      legendPeak: "高峰 (+{m} m)",
+      legendElevNote: "0.5 = 海平面；陆地/海洋均为线性：+max_elev_m / min_elev_m。",
+      legendPres: "气压",
+      legendPresNote: "行星气压带 + 局地热力气压。",
+      legendRgb: "真彩",
+      legendDark: "暗",
+      legendBright: "亮",
+      legendRgbNote: "卫星真彩色。",
+      legendSpeed: "风速（箭头着色）",
+      legendSpeedNote: "箭头钉在地图上随平移移动；缩放时屏幕密度大致不变。颜色=风速（高对比）。读数「风速去向」与箭头指向一致（0°北、90°东）。",
+    },
+    en: {
+      layer: "Layer",
+      layerSelectAria: "Select layer",
+      colorScale: "Color",
+      colorScaleTitle: "Apply a color scale to terrain / temperature grayscale maps",
+      graticule: "Graticule",
+      graticuleTitle: "Overlay lat/lon grid; equator / tropics / polar circles emphasized",
+      coast: "Coast",
+      coastTitle: "Stroke land boundaries from the Land Mask",
+      contours: "Contours",
+      contourTitle: "Overlay elevation contours",
+      wind: "Wind",
+      windTitle: "Overlay wind arrows (needs graphs/wind UV)",
+      reset: "Reset view",
+      resetTitle: "Reset view",
+      clearPin: "Clear pin",
+      clearPinTitle: "Clear pinned readout",
+      hint: "Scroll · drag · hover · pin",
+      langBtn: "中文",
+      langBtnTitle: "切换为中文",
+      monthNavAria: "Month",
+      prevMonth: "Prev",
+      nextMonth: "Next",
+      prevMonthTitle: "Previous month",
+      nextMonthTitle: "Next month",
+      prevKind: "Previous {kind}",
+      nextKind: "Next {kind}",
+      kindTemp: "temperature",
+      kindPres: "pressure",
+      hover: "Hover",
+      pin: "Pin",
+      legend: "Legend",
+      statusReady: "Ready to load…",
+      hoverMove: "Move the pointer over the map",
+      hoverOob: "Outside the image",
+      pinHint: "Click the map to pin a readout",
+      loading: "Loading…",
+      detecting: "Detecting layers…",
+      noLayers: "No layers available (need at least Terrain - Full Elevation.png)",
+      loadLayer: "Loading {name}…",
+      loadElev: "Loading elevation / Land Mask…",
+      noMask: "No Land Mask; land/ocean inferred from full elevation",
+      loadContours: "Loading contour overlay…",
+      loadTemps: "Loading temperature maps…",
+      loadPressure: "Loading pressure maps…",
+      dataReady: "ready",
+      noSat: "no satellite",
+      noTemp: "no temperature",
+      noPres: "no pressure",
+      noWind: "no wind",
+      noteColor: "color",
+      noteCoast: "coast",
+      noteContours: "contours",
+      noteGraticule: "graticule",
+      noteWind: "wind",
+      groupBase: "Base",
+      groupTerrain: "Terrain",
+      groupTemperature: "Temperature",
+      groupAtmosphere: "Atmosphere",
+      layerSat: "Satellite Color",
+      layerElev: "Terrain — Full Elevation",
+      layerTempAnn: "Temperature — Annual Mean",
+      layerTempMonth: "Temperature — {mm} {month}",
+      layerPresAnn: "Pressure — Annual Mean",
+      layerPresMonth: "Pressure — {mm} {month}",
+      lat: "Latitude",
+      lon: "Longitude",
+      type: "Type",
+      land: "Land",
+      ocean: "Ocean",
+      elev: "Elev / depth",
+      temp: "Temp",
+      frozen: "Frozen",
+      yes: "Yes",
+      no: "No",
+      pressure: "Pressure",
+      windToward: "Speed / toward",
+      color: "Color",
+      chartTitle: "Annual temperature · mean {mean} (dashed)",
+      legendTemp: "Temperature",
+      legendTempNote: "Land/ocean from the Land Mask; frozen: T ≤ 0 °C.",
+      legendElev: "Full elevation",
+      legendDeep: "Deep ocean ({m} m)",
+      legendPeak: "Peak (+{m} m)",
+      legendElevNote: "0.5 = sea level; land/ocean both linear: +max_elev_m / min_elev_m.",
+      legendPres: "Pressure",
+      legendPresNote: "Planetary belts + local thermal pressure.",
+      legendRgb: "True color",
+      legendDark: "Dark",
+      legendBright: "Bright",
+      legendRgbNote: "Satellite true color.",
+      legendSpeed: "Wind speed (arrow color)",
+      legendSpeedNote: "Arrows stay pinned to the map while panning; on-screen density is roughly constant when zooming. Color = speed (high contrast). Readout “speed / toward” matches the arrow (0° north, 90° east).",
+    },
+  };
+
+  const LANG_KEY = "imagdyn_viewer_lang";
+  let uiLang = "zh";
+
+  function t(key, vars) {
+    const table = I18N[uiLang] || I18N.zh;
+    let s = table[key] ?? I18N.zh[key] ?? key;
+    if (vars) {
+      for (const [k, v] of Object.entries(vars)) s = s.replaceAll(`{${k}}`, String(v));
+    }
+    return s;
+  }
+
+  function monthLabel(i) {
+    const names = uiLang === "en" ? MONTH_NAMES_EN : MONTH_NAMES_ZH;
+    return names[i] || String(i + 1);
+  }
+
+  function groupLabel(group) {
+    if (group === "Base") return t("groupBase");
+    if (group === "Terrain") return t("groupTerrain");
+    if (group === "Temperature") return t("groupTemperature");
+    if (group === "Atmosphere") return t("groupAtmosphere");
+    return group;
+  }
+
+  function layerDisplayName(layer) {
+    if (!layer) return "";
+    if (layer.id === "sat") return t("layerSat");
+    if (layer.id === "elev-full") return t("layerElev");
+    if (layer.id === "t-ann") return t("layerTempAnn");
+    if (layer.id === "p-ann") return t("layerPresAnn");
+    if (typeof layer.monthIndex === "number" && layer.monthIndex >= 0) {
+      const mm = String(layer.monthIndex + 1).padStart(2, "0");
+      const month = monthLabel(layer.monthIndex);
+      if (layer.kind === "temperature") return t("layerTempMonth", { mm, month });
+      if (layer.kind === "pressure") return t("layerPresMonth", { mm, month });
+    }
+    return layer.name;
+  }
+
+  function detectLang() {
+    try {
+      const q = new URLSearchParams(location.search).get("lang");
+      if (q === "en" || q === "zh") return q;
+    } catch (_) { /* ignore */ }
+    try {
+      const saved = localStorage.getItem(LANG_KEY);
+      if (saved === "en" || saved === "zh") return saved;
+    } catch (_) { /* ignore */ }
+    return "zh";
+  }
+
+  function applyStaticI18n() {
+    document.documentElement.lang = uiLang === "en" ? "en" : "zh-CN";
+    document.querySelectorAll("[data-i18n]").forEach((el) => {
+      el.textContent = t(el.getAttribute("data-i18n"));
+    });
+    document.querySelectorAll("[data-i18n-title]").forEach((el) => {
+      el.setAttribute("title", t(el.getAttribute("data-i18n-title")));
+    });
+    document.querySelectorAll("[data-i18n-aria]").forEach((el) => {
+      el.setAttribute("aria-label", t(el.getAttribute("data-i18n-aria")));
+    });
+    const sel = document.getElementById("layerSelect");
+    if (sel) sel.setAttribute("aria-label", t("layerSelectAria"));
+  }
+
+  function applyUiLang() {
+    applyStaticI18n();
+    if (LAYERS.length && els.select) fillSelect();
+    if (state.layer) {
+      updateLegend();
+      updateMonthNav();
+      updatePinUI();
+      if (state.hover) updateHoverUI(state.hover);
+      else els.hoverData.innerHTML = `<div class="empty">${t("hoverMove")}</div>`;
+      if (state.iw) {
+        const notes = [];
+        if (state.useColorScale && supportsColorScale(state.layer.kind)) notes.push(t("noteColor"));
+        if (state.showCoast) notes.push(t("noteCoast"));
+        if (state.showContours) notes.push(t("noteContours"));
+        if (state.showGraticule) notes.push(t("noteGraticule"));
+        if (state.showWindArrows) notes.push(t("noteWind"));
+        setStatus(`${layerDisplayName(state.layer)} · ${state.iw}×${state.ih}${notes.length ? " · " + notes.join(" · ") : ""}`);
+      }
+    }
+  }
+
+  function setUiLang(lang) {
+    if (lang !== "en" && lang !== "zh") return;
+    if (lang === uiLang) return;
+    uiLang = lang;
+    try { localStorage.setItem(LANG_KEY, lang); } catch (_) { /* ignore */ }
+    applyUiLang();
+  }
 
   const TEMP_LAYER_DEFS = [
     { id: "t-ann", name: "Temperature — Annual Mean", src: "../graphs/temperature/Temperature - Annual Mean.png", monthIndex: -1 },
@@ -542,6 +899,9 @@
     legendBody: document.getElementById("legendBody"),
     status: document.getElementById("status"),
   };
+
+  uiLang = detectLang();
+  applyStaticI18n();
 
   const ctx = els.canvas.getContext("2d", { alpha: false });
   const lutCache = new Map();
@@ -870,15 +1230,17 @@
   }
 
   function fillSelect() {
+    const keep = els.select.value || (state.layer && state.layer.id);
+    els.select.innerHTML = "";
     const groups = [...new Set(LAYERS.map((l) => l.group))];
     for (const g of groups) {
       const og = document.createElement("optgroup");
-      og.label = g;
+      og.label = groupLabel(g);
       for (const layer of LAYERS.filter((l) => l.group === g)) {
         const opt = document.createElement("option");
         opt.value = layer.id;
-        opt.textContent = layer.name;
-        if (layer.id === state.layer.id) opt.selected = true;
+        opt.textContent = layerDisplayName(layer);
+        if (layer.id === keep) opt.selected = true;
         og.appendChild(opt);
       }
       els.select.appendChild(og);
@@ -1210,11 +1572,11 @@
     const show = isMonthlyNavLayer(state.layer);
     els.monthNav.classList.toggle("show", show);
     if (show) {
-      els.monthLabel.textContent = MONTH_NAMES[state.layer.monthIndex];
+      els.monthLabel.textContent = monthLabel(state.layer.monthIndex);
       els.select.value = state.layer.id;
-      const kindLabel = state.layer.kind === "pressure" ? "气压" : "气温";
-      els.btnPrevMonth.title = `上一月${kindLabel}`;
-      els.btnNextMonth.title = `下一月${kindLabel}`;
+      const kindLabel = state.layer.kind === "pressure" ? t("kindPres") : t("kindTemp");
+      els.btnPrevMonth.title = t("prevKind", { kind: kindLabel });
+      els.btnNextMonth.title = t("nextKind", { kind: kindLabel });
     }
   }
 
@@ -1276,38 +1638,38 @@
     const minElev = state.tempMeta.min_elev_m != null ? state.tempMeta.min_elev_m : -maxElev;
     if (kind === "temperature") {
       return {
-        title: "气温",
+        title: t("legendTemp"),
         gradient: LEGEND_CSS.temperature,
         left: `${tMin} °C`,
         right: `${tMax} °C`,
-        note: "海陆类型由 Land Mask 判定；封冻：温度 ≤ 0 °C。",
+        note: t("legendTempNote"),
       };
     }
     if (kind === "elev_full") {
       return {
-        title: "全海拔",
+        title: t("legendElev"),
         gradient: state.useColorScale ? LEGEND_CSS.elev_full : "linear-gradient(90deg,#050505,#808080 50%,#fff)",
-        left: `深海 (${minElev} m)`,
-        right: `高峰 (+${maxElev} m)`,
-        note: "0.5 = 海平面；陆地/海洋均为线性：+max_elev_m / min_elev_m。",
+        left: t("legendDeep", { m: minElev }),
+        right: t("legendPeak", { m: maxElev }),
+        note: t("legendElevNote"),
       };
     }
     if (kind === "pressure") {
       const [pMin, pMax] = state.windMeta.gray_scale_pressure_hpa || [980, 1040];
       return {
-        title: "气压",
+        title: t("legendPres"),
         gradient: LEGEND_CSS.pressure,
         left: `${pMin.toFixed(0)} hPa`,
         right: `${pMax.toFixed(0)} hPa`,
-        note: "行星气压带 + 局地热力气压。",
+        note: t("legendPresNote"),
       };
     }
     return {
-      title: "真彩",
+      title: t("legendRgb"),
       gradient: LEGEND_CSS.rgb,
-      left: "暗",
-      right: "亮",
-      note: "卫星真彩色。",
+      left: t("legendDark"),
+      right: t("legendBright"),
+      note: t("legendRgbNote"),
     };
   }
 
@@ -1321,25 +1683,29 @@
   }
 
   function formatReadout(sample, withChart = false) {
-    if (!sample) return '<div class="empty">超出图像范围</div>';
+    if (!sample) return `<div class="empty">${t("hoverOob")}</div>`;
     const { lat, lon } = sample.ll;
     const sw = displayColor(sample.rgba);
     const swatch = `rgb(${sw.r},${sw.g},${sw.b})`;
     const freezeC = state.tempMeta.freeze_C ?? 0;
+    const kTemp = t("temp");
+    const kType = t("type");
+    const kPres = t("pressure");
+    const kWind = t("windToward");
     const rows = [
-      ["纬度", `${lat.toFixed(4)}°`],
-      ["经度", `${lon.toFixed(4)}°`],
-      ["类型", sample.isLand ? "陆地" : "海洋"],
-      ["海拔/水深", sample.isLand ? `+${sample.elevM.toFixed(0)} m` : `−${Math.abs(sample.elevM).toFixed(0)} m`],
-      ["温度", sample.tC == null ? "—" : `${sample.tC.toFixed(2)} °C`],
-      ["封冻", sample.tC == null ? "—" : (sample.tC <= freezeC ? "是" : "否")],
-      ["气压", sample.pressureHpa == null ? "—" : `${Math.round(sample.pressureHpa)} hPa`],
-      ["风速去向", formatWindReadout(sample.windSpeed, sample.windU, sample.windV)],
-      ["颜色", `<span class="swatch" style="background:${swatch}"></span>${swatch}`],
+      [t("lat"), `${lat.toFixed(4)}°`],
+      [t("lon"), `${lon.toFixed(4)}°`],
+      [kType, sample.isLand ? t("land") : t("ocean")],
+      [t("elev"), sample.isLand ? `+${sample.elevM.toFixed(0)} m` : `−${Math.abs(sample.elevM).toFixed(0)} m`],
+      [kTemp, sample.tC == null ? "—" : `${sample.tC.toFixed(2)} °C`],
+      [t("frozen"), sample.tC == null ? "—" : (sample.tC <= freezeC ? t("yes") : t("no"))],
+      [kPres, sample.pressureHpa == null ? "—" : `${Math.round(sample.pressureHpa)} hPa`],
+      [kWind, formatWindReadout(sample.windSpeed, sample.windU, sample.windV)],
+      [t("color"), `<span class="swatch" style="background:${swatch}"></span>${swatch}`],
     ];
     const html = rows
       .map(([k, v]) => {
-        const emph = k === "温度" || k === "类型" || k === "气压" || k === "风速去向";
+        const emph = k === kTemp || k === kType || k === kPres || k === kWind;
         return `<div class="k">${k}</div><div class="v${emph ? " emph" : ""}">${v}</div>`;
       })
       .join("");
@@ -1349,7 +1715,7 @@
       const meanTxt = sample.tMean == null ? "—" : `${sample.tMean.toFixed(1)} °C`;
       chart = `
         <div class="temp-chart-wrap">
-          <div class="chart-title">年温度变化 · 均温 ${meanTxt}（虚线）</div>
+          <div class="chart-title">${t("chartTitle", { mean: meanTxt })}</div>
           <canvas id="pinChart" width="300" height="120"></canvas>
           <div class="chart-tooltip" id="chartTooltip"></div>
         </div>`;
@@ -1504,7 +1870,7 @@
           tip.classList.remove("show");
           return;
         }
-        tip.textContent = `${MONTH_NAMES[best.i]}: ${best.t.toFixed(2)} °C`;
+        tip.textContent = `${monthLabel(best.i)}: ${best.t.toFixed(2)} °C`;
         placeChartTooltip(tip, ev.clientX, ev.clientY);
       };
       canvas.onmouseleave = () => tip.classList.remove("show");
@@ -1598,10 +1964,10 @@
     if (state.showWindArrows && state.hasWindUV) {
       const [sMin, sMax] = state.windMeta.gray_scale_speed || [0, 30];
       html += `
-        <div style="font-family:var(--font-data);font-size:0.78rem;margin:0.75rem 0 0.25rem">风速（箭头着色）</div>
+        <div style="font-family:var(--font-data);font-size:0.78rem;margin:0.75rem 0 0.25rem">${t("legendSpeed")}</div>
         <div class="legend-bar" style="background:${LEGEND_CSS.wind_speed}"></div>
         <div class="legend-labels"><span>${sMin.toFixed(1)}</span><span>${sMax.toFixed(1)}</span></div>
-        <div class="legend-note">箭头钉在地图上随平移移动；缩放时屏幕密度大致不变。颜色=风速（高对比）。读数「风速去向」与箭头指向一致（0°北、90°东）。</div>
+        <div class="legend-note">${t("legendSpeedNote")}</div>
       `;
     }
     els.legendBody.innerHTML = html;
@@ -1611,7 +1977,7 @@
     state.hover = sample;
     if (!sample) {
       els.crosshair.classList.remove("on");
-      els.hoverData.innerHTML = '<div class="empty">超出图像范围</div>';
+      els.hoverData.innerHTML = `<div class="empty">${t("hoverOob")}</div>`;
       return;
     }
     const rect = els.viewport.getBoundingClientRect();
@@ -1629,7 +1995,7 @@
   function updatePinUI() {
     if (!state.pin) {
       els.pinMarker.classList.remove("on");
-      els.pinData.innerHTML = '<div class="empty">单击地图以固定读数</div>';
+      els.pinData.innerHTML = `<div class="empty">${t("pinHint")}</div>`;
       return;
     }
     const sample = readAt(state.pin.px + 0.5, state.pin.py + 0.5);
@@ -1644,8 +2010,8 @@
 
   async function loadLayer(layer, { keepView = false } = {}) {
     state.layer = layer;
-    setStatus(`加载 ${layer.name}…`);
-    els.hoverData.innerHTML = '<div class="empty">加载中…</div>';
+    setStatus(t("loadLayer", { name: layerDisplayName(layer) }));
+    els.hoverData.innerHTML = `<div class="empty">${t("loading")}</div>`;
 
     let usedCache = false;
     if (layer.kind === "temperature" && state.dataReady) {
@@ -1690,12 +2056,12 @@
     updateMonthNav();
     updatePinUI();
     const notes = [];
-    if (state.useColorScale && supportsColorScale(layer.kind)) notes.push("色阶");
-    if (state.showCoast) notes.push("描边");
-    if (state.showContours) notes.push("等高线");
-    if (state.showGraticule) notes.push("经纬网");
-    if (state.showWindArrows) notes.push("风向");
-    setStatus(`${layer.name} · ${state.iw}×${state.ih}${notes.length ? " · " + notes.join(" · ") : ""}`);
+    if (state.useColorScale && supportsColorScale(layer.kind)) notes.push(t("noteColor"));
+    if (state.showCoast) notes.push(t("noteCoast"));
+    if (state.showContours) notes.push(t("noteContours"));
+    if (state.showGraticule) notes.push(t("noteGraticule"));
+    if (state.showWindArrows) notes.push(t("noteWind"));
+    setStatus(`${layerDisplayName(layer)} · ${state.iw}×${state.ih}${notes.length ? " · " + notes.join(" · ") : ""}`);
   }
 
   function refreshDisplay() {
@@ -1708,7 +2074,7 @@
   }
 
   async function loadGlobalData() {
-    setStatus("加载海拔 / Land Mask…");
+    setStatus(t("loadElev"));
     const elevImg = await loadImage(ELEV_URL);
     let landImg = null;
     try {
@@ -1727,12 +2093,12 @@
     } else {
       // Derive land from full elevation (0.5 = sea level) if mask missing
       for (let i = 0; i < elevGray.length; i++) state.land[i] = elevGray[i] > 127 ? 1 : 0;
-      setStatus("未找到 Land Mask，已从全海拔推导海陆", true);
+      setStatus(t("noMask"), true);
     }
     state.coastOverlay = buildCoastOverlay(state.land, w, h);
 
     if (state.hasContours !== false) {
-      setStatus("加载等高线叠加…");
+      setStatus(t("loadContours"));
       try {
         const contourImg = await loadImage(CONTOUR_URL);
         state.contourOverlay = buildContourOverlay(contourImg);
@@ -1746,7 +2112,7 @@
     state.tempAnnual = null;
     state.tempMonths = Array(12).fill(null);
     if (TEMP_LAYERS.length) {
-      setStatus("加载气温图…");
+      setStatus(t("loadTemps"));
       for (const t of TEMP_LAYERS) {
         try {
           const img = await loadImage(t.src);
@@ -1763,7 +2129,7 @@
     state.pressureMonths = Array(12).fill(null);
     const pressureLayers = LAYERS.filter((l) => l.kind === "pressure");
     if (pressureLayers.length) {
-      setStatus("加载气压图…");
+      setStatus(t("loadPressure"));
       for (const pl of pressureLayers) {
         try {
           const img = await loadImage(pl.src);
@@ -1898,6 +2264,10 @@
   }
 
   // --- events ---
+  document.getElementById("btnLang").addEventListener("click", () => {
+    setUiLang(uiLang === "en" ? "zh" : "en");
+  });
+
   els.select.addEventListener("change", () => {
     const layer = LAYERS.find((l) => l.id === els.select.value);
     if (layer) loadLayer(layer).catch((e) => setStatus(String(e.message || e), true));
@@ -2009,7 +2379,7 @@
     if (state.panning) return;
     state.hover = null;
     els.crosshair.classList.remove("on");
-    els.hoverData.innerHTML = '<div class="empty">将鼠标移到地图上</div>';
+    els.hoverData.innerHTML = `<div class="empty">${t("hoverMove")}</div>`;
   });
 
   els.viewport.addEventListener("contextmenu", (e) => e.preventDefault());
@@ -2035,9 +2405,11 @@
   });
 
   async function init() {
-    setStatus("检测可用图层…");
+    uiLang = detectLang();
+    applyStaticI18n();
+    setStatus(t("detecting"));
     await resolveLayers();
-    if (!LAYERS.length) throw new Error("没有可用图层（至少需要 Terrain - Full Elevation.png）");
+    if (!LAYERS.length) throw new Error(t("noLayers"));
     fillSelect();
     try {
       const res = await fetch(TEMP_META_URL);
@@ -2073,12 +2445,12 @@
     updateLegend();
     await loadLayer(state.layer);
     const bits = [];
-    if (!state.hasSatellite) bits.push("无卫星图");
-    if (!state.hasTemps) bits.push("无气温层");
-    if (!state.hasPressure) bits.push("无气压层");
-    if (!state.hasWindUV) bits.push("无风向");
+    if (!state.hasSatellite) bits.push(t("noSat"));
+    if (!state.hasTemps) bits.push(t("noTemp"));
+    if (!state.hasPressure) bits.push(t("noPres"));
+    if (!state.hasWindUV) bits.push(t("noWind"));
     setStatus(
-      `${state.layer.name} · ${state.iw}×${state.ih} · 数据就绪` +
+      `${layerDisplayName(state.layer)} · ${state.iw}×${state.ih} · ${t("dataReady")}` +
         (bits.length ? ` · ${bits.join(" · ")}` : "")
     );
   }

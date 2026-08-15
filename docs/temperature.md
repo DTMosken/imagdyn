@@ -1,5 +1,7 @@
 # 气温合成
 
+*[English](temperature.en.md) | 中文*
+
 模块：[`imagdyn/temperature.py`](../imagdyn/temperature.py)、洋流 [`imagdyn/currents.py`](../imagdyn/currents.py)。
 
 ## 流程概要

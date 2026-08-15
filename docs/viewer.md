@@ -1,5 +1,7 @@
 # Viewer
 
+*[English](viewer.en.md) | 中文*
+
 前端：[`viewer/index.html`](../viewer/index.html)。由 `imagdyn viewer` 提供本地 HTTP 静态服务。
 
 ## 启动
@@ -19,7 +21,7 @@
 - **等高线**：次级 200 m，主等高线 1000 m（加粗）
 - **风**：风向叠加箭头；UV / 气压从图中解码（见 [数据格式](data-formats.md)）
 - **读数**：悬停与钉点（经纬、海陆、海拔或水深、气温）；钉点可看全年气温曲线
-- **资源**：优先 `graphs/assets.json`，否则逐文件探测
+- **语言**：右上角按钮在 **EN** / **中文** 间切换；选择写入 `localStorage`（`imagdyn_viewer_lang`），也可用 `?lang=en` / `?lang=zh`
 
 界面截图见 [README · 界面示例](../README.md#界面示例)。
 
