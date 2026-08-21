@@ -8,6 +8,7 @@ from PIL import Image
 
 from . import assets, paths
 from .assets import ensure_derived_terrain
+from .params import CONTOURS, PLANET
 from .timing import StepTimer, format_duration
 
 
@@ -31,7 +32,7 @@ def main() -> None:
             land = land[..., 0]
         land = land > 127
 
-    max_elev_m = 8000.0
+    max_elev_m = PLANET.max_elev_m
     elev_m = np.where(land, (elev - 0.5) / 0.5 * max_elev_m, 0.0).astype(np.float32)
     elev_m = np.clip(elev_m, 0.0, max_elev_m)
 
@@ -48,9 +49,9 @@ def main() -> None:
     rgb[..., 1] = np.where(land, 0.18 + 0.22 * land_shade, rgb[..., 1])
     rgb[..., 2] = np.where(land, 0.14 + 0.16 * land_shade, rgb[..., 2])
 
-    # Contour levels (m). Index every 1000 m drawn thicker.
-    minor = np.arange(200, max_elev_m + 1, 200, dtype=np.float32)
-    major = np.arange(1000, max_elev_m + 1, 1000, dtype=np.float32)
+    # Contour levels (m). Index every major_m drawn thicker.
+    minor = np.arange(CONTOURS.minor_m, max_elev_m + 1, CONTOURS.minor_m, dtype=np.float32)
+    major = np.arange(CONTOURS.major_m, max_elev_m + 1, CONTOURS.major_m, dtype=np.float32)
     major_set = {float(x) for x in major}
     minor_only = [float(lv) for lv in minor if float(lv) not in major_set]
     level_timer = StepTimer("levels", total_steps=len(minor_only) + len(major))

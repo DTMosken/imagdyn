@@ -6,14 +6,15 @@ full-elevation terrain (0.5 = sea level).
 Drivers
 -------
 - Top-of-atmosphere solar irradiance (default S0 = 1361 W/m^2)
-- Axial tilt / tropics at +/-23.5 deg (smooth, no hard latitude bands)
-- Elevation lapse rate on land
-- Distance to *open* ocean + nearby open-ocean area (maritime moderation)
-  Water with that month's temperature at or below 0 C does not provide
-  maritime influence for that month
-- Coastal buffering via GPU heat-diffusion (repeated separable mean filters)
-  rather than Euclidean distance transform (EDT)
-- Ocean currents (east-warm / west-cold) folded into base seawater SST targets
+- Heat-capacity energy balance with greenhouse OLR = σT^4 / G
+- Newtonian heat transport Q_transport = λ (T̄_global − T_local) in Q_abs
+- Land / ocean / lake effective heat capacity (depth inertia + latent peak)
+- GPU sea-level temperature diffusion (metric 1/cos φ kernels)
+- Ocean currents as an energy flux in Q_abs (east-warm / west-cold)
+- Elevation lapse applied after sea-level diffusion
+
+Spin-up runs ``spinup_years`` virtual years; only the last 12 months are
+returned and written.
 
 Uses PyTorch CUDA when available (conda env tf-gpu).
 
@@ -24,6 +25,8 @@ default T_MIN=-60 C, T_MAX=+45 C.
 Usage::
 
     python -m imagdyn temperature
+
+Tunables default to ``imagdyn/params.py`` (CLI flags still override).
 """
 
 from __future__ import annotations
@@ -31,6 +34,7 @@ from __future__ import annotations
 import argparse
 import gc
 import json
+import math
 from pathlib import Path
 
 import numpy as np
@@ -38,10 +42,21 @@ import torch
 import torch.nn.functional as F
 from PIL import Image
 
+from .io_gray import save_gray_png, write_text_atomic
+from .params import (
+    CURRENTS,
+    ENCODE,
+    METRIC_COS_EPS,
+    PLANET,
+    STEFAN_BOLTZMANN,
+    TEMPERATURE,
+    temperature_call_kwargs,
+    wind_field_kwargs,
+)
 from .timing import StepTimer, format_duration
 
 
-SIGMA = 5.670374419e-8  # Stefan-Boltzmann, W m^-2 K^-4
+SIGMA = STEFAN_BOLTZMANN  # W m^-2 K^-4
 
 MID_MONTH_DOY = np.array(
     [15, 46, 74, 105, 135, 166, 196, 227, 258, 288, 319, 349], dtype=np.float64
@@ -100,6 +115,203 @@ def latitude_grid(height: int, device: torch.device) -> torch.Tensor:
     )
 
 
+def _lat_1d(lat_deg: torch.Tensor, height: int) -> torch.Tensor:
+    lat = lat_deg[:, 0] if lat_deg.ndim >= 2 else lat_deg.reshape(-1)
+    return lat[:height]
+
+
+def cos_lat_weight(lat_deg: torch.Tensor, *, eps: float = 0.0) -> torch.Tensor:
+    """``cos(φ)`` clamped to ``[eps, 1]``. ``lat_deg`` is 1-D (H,) or a column of (H, W)."""
+    lat1 = lat_deg[:, 0] if lat_deg.ndim >= 2 else lat_deg.reshape(-1)
+    return torch.cos(torch.deg2rad(lat1)).clamp(float(eps), 1.0)
+
+
+def area_weights(lat_deg: torch.Tensor, width: int) -> torch.Tensor:
+    """Spherical-cap cell weights ``dA ∝ cos(φ)`` as an (H, W) tensor."""
+    w1 = cos_lat_weight(lat_deg, eps=0.0)
+    return w1[:, None].expand(-1, int(width))
+
+
+def area_weighted_mean(
+    field: torch.Tensor,
+    lat_deg: torch.Tensor,
+    mask: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """
+    Area-weighted mean with ``dA ∝ cos(φ)``.
+
+    ``field`` is (H,), (H, W), or (..., H, W). ``mask`` broadcasts over spatial dims.
+    """
+    field = torch.as_tensor(field)
+    if field.ndim == 1:
+        lat1 = _lat_1d(lat_deg.to(device=field.device), field.shape[0])
+        wt = cos_lat_weight(lat1, eps=0.0).to(dtype=field.dtype)
+        if mask is not None:
+            wt = wt * mask.to(device=field.device, dtype=field.dtype).reshape(-1)
+        return (field * wt).sum() / wt.sum().clamp_min(1e-6)
+
+    h, w = int(field.shape[-2]), int(field.shape[-1])
+    lat1 = _lat_1d(lat_deg.to(device=field.device), h)
+    wt = cos_lat_weight(lat1, eps=0.0).to(dtype=field.dtype)[:, None].expand(h, w)
+    if mask is not None:
+        m = mask.to(device=field.device, dtype=field.dtype)
+        while m.ndim < field.ndim:
+            m = m.unsqueeze(0)
+        num = (field * wt * m).sum(dim=(-2, -1))
+        den = (wt * m).sum(dim=(-2, -1)).clamp_min(1e-6)
+        return num / den
+    num = (field * wt).sum(dim=(-2, -1))
+    den = wt.sum().clamp_min(1e-6)
+    return num / den
+
+
+def area_weights_np(lat_deg: np.ndarray, width: int | None = None) -> np.ndarray:
+    lat = np.asarray(lat_deg, dtype=np.float64).reshape(-1)
+    w1 = np.clip(np.cos(np.deg2rad(lat)), 0.0, 1.0)
+    if width is None:
+        return w1
+    return np.broadcast_to(w1[:, None], (lat.size, int(width))).copy()
+
+
+def area_weighted_mean_np(
+    field: np.ndarray,
+    lat_deg: np.ndarray,
+    mask: np.ndarray | None = None,
+) -> float:
+    """Numpy ``dA ∝ cos(φ)`` mean of a 1-D profile or 2-D map (optional bool mask)."""
+    arr = np.asarray(field, dtype=np.float64)
+    lat = np.asarray(lat_deg, dtype=np.float64).reshape(-1)
+    wt1 = np.clip(np.cos(np.deg2rad(lat)), 0.0, 1.0)
+    if arr.ndim == 1:
+        wt = wt1[: arr.size]
+        if mask is not None:
+            wt = wt * np.asarray(mask, dtype=np.float64).reshape(-1)[: arr.size]
+        ok = np.isfinite(arr)
+        wt = np.where(ok, wt, 0.0)
+        s = float(wt.sum())
+        return float((arr * wt).sum() / s) if s > 0.0 else 0.0
+    h, w = arr.shape[-2], arr.shape[-1]
+    wt = np.broadcast_to(wt1[:h, None], (h, w))
+    if mask is not None:
+        m = np.asarray(mask, dtype=bool)
+        if m.shape != arr.shape[-2:]:
+            m = np.broadcast_to(m, (h, w))
+        sel = m & np.isfinite(arr if arr.ndim == 2 else arr.reshape(-1, h, w)[0])
+        if arr.ndim != 2:
+            raise ValueError("area_weighted_mean_np mask path expects a 2-D field")
+        vals = arr[sel]
+        wsel = wt[sel]
+    else:
+        if arr.ndim != 2:
+            raise ValueError("area_weighted_mean_np expects a 1-D or 2-D field")
+        ok = np.isfinite(arr)
+        vals = arr[ok]
+        wsel = wt[ok]
+    s = float(np.sum(wsel))
+    return float(np.sum(vals * wsel) / s) if s > 0.0 else 0.0
+
+
+def conv1d_lon_grouped(field: torch.Tensor, kernels: torch.Tensor) -> torch.Tensor:
+    """Per-row 1D conv along longitude (circular). ``kernels``: (H, 1, K), K odd."""
+    h, _w = field.shape
+    r = int(kernels.shape[-1]) // 2
+    if r <= 0:
+        return field
+    padded = torch.cat([field[:, -r:], field, field[:, :r]], dim=1)
+    return F.conv1d(padded[None], kernels, groups=h)[0]
+
+
+def conv1d_lat_replicate(field: torch.Tensor, kernel: torch.Tensor) -> torch.Tensor:
+    """Uniform 1D conv along latitude (replicate pad). ``kernel`` is (K,) or (1, 1, K)."""
+    k = kernel.reshape(-1)
+    r = int(k.numel()) // 2
+    if r <= 0:
+        return field
+    pad = torch.cat([field[:1].expand(r, -1), field, field[-1:].expand(r, -1)], dim=0)
+    out = F.conv1d(pad.T[:, None, :], k.reshape(1, 1, -1))
+    return out[:, 0, :].T
+
+
+def _ew_radius_cap(width: int, sigma_or_rx_max: float) -> int:
+    return max(1, min(max(1, int(width) // 6), max(1, int(math.ceil(float(sigma_or_rx_max))))))
+
+
+def lon_sigma_px(
+    lat_deg: torch.Tensor,
+    sigma_eq: float,
+    *,
+    eps: float = METRIC_COS_EPS,
+) -> torch.Tensor:
+    """Pixel EW Gaussian width ``σ_eq / max(cos φ, ε)`` per latitude row."""
+    cos = torch.cos(torch.deg2rad(lat_deg)).abs().clamp(float(eps), 1.0)
+    return float(sigma_eq) / cos
+
+
+def smooth_lonlat_metric(
+    field: torch.Tensor,
+    lat_deg: torch.Tensor,
+    sigma_eq_px: float,
+    *,
+    eps: float = METRIC_COS_EPS,
+) -> torch.Tensor:
+    """
+    Separable metric Gaussian: NS uses ``σ_eq``; EW uses ``σ_eq / max(cos φ, ε)``.
+
+    Longitude wraps; latitude replicates. Replaces a single isotropic 2D conv.
+    """
+    if sigma_eq_px <= 0:
+        return field
+    h, w = field.shape
+    lat1 = _lat_1d(lat_deg.to(device=field.device, dtype=field.dtype), h)
+    sig_eq = max(float(sigma_eq_px), 0.35)
+
+    max_r_ns = max(1, h // 2)
+    sig_ns = min(sig_eq, max_r_ns / 3.0)
+    r_ns = min(max(1, int(math.ceil(3.0 * sig_ns))), max_r_ns)
+    x_ns = torch.arange(-r_ns, r_ns + 1, device=field.device, dtype=field.dtype)
+    g_ns = torch.exp(-0.5 * (x_ns / max(sig_ns, 0.35)) ** 2)
+    g_ns = g_ns / g_ns.sum().clamp_min(1e-12)
+    out = conv1d_lat_replicate(field, g_ns)
+
+    sig_row = lon_sigma_px(lat1, sig_eq, eps=eps)
+    r_ew = _ew_radius_cap(w, 3.0 * float(sig_row.max().item()))
+    x = torch.arange(-r_ew, r_ew + 1, device=field.device, dtype=field.dtype)
+    sig = sig_row.clamp(min=0.35)[:, None]
+    kernels = torch.exp(-0.5 * (x[None, :] / sig) ** 2)
+    kernels = kernels / kernels.sum(dim=1, keepdim=True).clamp_min(1e-12)
+    return conv1d_lon_grouped(out, kernels[:, None, :])
+
+
+def box_filter_lonlat_metric(
+    field: torch.Tensor,
+    lat_deg: torch.Tensor,
+    ry: int,
+    rx_eq: int,
+    *,
+    eps: float = METRIC_COS_EPS,
+) -> torch.Tensor:
+    """Separable mean filter: NS radius ``ry``; EW radius ``rx_eq / max(cos φ, ε)`` per row."""
+    h, w = field.shape
+    ry_i = max(int(ry), 0)
+    rx_i = max(int(rx_eq), 0)
+    out = field
+    if ry_i > 0:
+        k = 2 * ry_i + 1
+        kernel = torch.ones(k, device=field.device, dtype=field.dtype) / float(k)
+        out = conv1d_lat_replicate(out, kernel)
+    if rx_i <= 0:
+        return out
+    lat1 = _lat_1d(lat_deg.to(device=field.device, dtype=field.dtype), h)
+    cos = torch.cos(torch.deg2rad(lat1)).abs().clamp(float(eps), 1.0)
+    rx_row = (float(rx_i) / cos).round().clamp(min=1.0)
+    r_ew = _ew_radius_cap(w, float(rx_row.max().item()))
+    rx_row = rx_row.clamp(max=float(r_ew))
+    x = torch.arange(-r_ew, r_ew + 1, device=field.device, dtype=field.dtype)
+    kernels = (x.abs()[None, :] <= rx_row[:, None]).to(dtype=field.dtype)
+    kernels = kernels / kernels.sum(dim=1, keepdim=True).clamp_min(1e-12)
+    return conv1d_lon_grouped(out, kernels[:, None, :])
+
+
 def solar_declination_deg(doy: np.ndarray | float, obliquity_deg: float = 23.5) -> np.ndarray:
     doy = np.asarray(doy, dtype=np.float64)
     lam = np.deg2rad(360.0 * (doy - 81.0) / 365.25)
@@ -129,40 +341,104 @@ def daily_mean_toa_insolation(
     return torch.clamp(q, min=0.0)
 
 
-def soft_tropics_weight(abs_lat: torch.Tensor, obliquity_deg: float) -> torch.Tensor:
-    """Smooth tropics weight in [0,1], peaking at equator, ~0 beyond tropics."""
-    # Raised-cosine falloff to 0 at ~1.35 * obliquity (no hard edge at 23.5)
-    x = torch.clamp(abs_lat / (obliquity_deg * 1.35), 0.0, 1.0)
-    return 0.5 * (1.0 + torch.cos(np.pi * x))
-
-
-def soft_subtropical_dry(abs_lat: torch.Tensor, obliquity_deg: float) -> torch.Tensor:
-    """Smooth subtropical dry peak near ~obliquity+8 deg."""
-    center = obliquity_deg + 8.0
-    width = 12.0
-    return torch.exp(-0.5 * ((abs_lat - center) / width) ** 2)
-
-
 def soft_step(x: torch.Tensor, center: float, scale: float) -> torch.Tensor:
     """Smooth 0->1 step; larger scale = softer."""
     return torch.sigmoid((x - center) / max(scale, 1e-3))
 
 
-def radiative_temperature_C(
-    q: torch.Tensor,
-    albedo: torch.Tensor,
-    greenhouse_factor: float,
-    q_floor: float = 25.0,
+MONTH_DT_S = 365.25 / 12.0 * 86400.0
+WATER_DENSITY = 1000.0  # kg m^-3
+LATENT_HEAT_FUSION = 3.34e5  # J kg^-1
+T_K_FLOOR = 50.0
+
+
+def depth_inertia(
+    z_m: torch.Tensor,
+    inertia_shallow: float = TEMPERATURE.inertia_shallow,
+    inertia_deep: float = TEMPERATURE.inertia_deep,
+    mix_depth_m: float = TEMPERATURE.mix_depth_m,
 ) -> torch.Tensor:
-    absorbed = greenhouse_factor * (1.0 - albedo) * torch.clamp(q, min=q_floor)
-    t_k = torch.pow(torch.clamp(absorbed, min=1.0) / SIGMA, 0.25)
-    return t_k - 273.15
+    """I(z) = I_shallow + (I_deep - I_shallow) * (1 - exp(-z / d0))."""
+    d0 = max(float(mix_depth_m), 1e-6)
+    z = z_m.clamp(min=0.0)
+    i0 = float(inertia_shallow)
+    i1 = float(inertia_deep)
+    return i0 + (i1 - i0) * (1.0 - torch.exp(-z / d0))
 
 
-def apply_heat_transport(q: torch.Tensor, strength: float) -> torch.Tensor:
-    if strength <= 0.0:
-        return q
-    return (1.0 - strength) * q + strength * q.mean()
+def latent_peak_J_m2_K(
+    latent_ice_m: float = TEMPERATURE.latent_ice_m,
+    delta_c: float = TEMPERATURE.freeze_latent_delta_C,
+) -> float:
+    """C_peak = L ρ h / (δ √(2π)) for a Gaussian virtual heat capacity."""
+    d = max(float(delta_c), 1e-6)
+    h = max(float(latent_ice_m), 0.0)
+    return LATENT_HEAT_FUSION * WATER_DENSITY * h / (d * math.sqrt(2.0 * math.pi))
+
+
+def latent_heat_capacity(
+    t_c: torch.Tensor,
+    freeze_c: torch.Tensor | float,
+    delta_c: float = TEMPERATURE.freeze_latent_delta_C,
+    peak: float | None = None,
+) -> torch.Tensor:
+    """Gaussian virtual heat capacity peaked at the freeze point."""
+    if peak is None:
+        peak = latent_peak_J_m2_K(delta_c=delta_c)
+    d = max(float(delta_c), 1e-6)
+    x = (t_c - freeze_c) / d
+    return float(peak) * torch.exp(-0.5 * x * x)
+
+
+def ice_albedo_weight(
+    t_c: torch.Tensor,
+    freeze_c: torch.Tensor | float,
+    soft_c: float = TEMPERATURE.ice_albedo_soft_C,
+) -> torch.Tensor:
+    """Sigmoid ice fraction: 0.5 at T = T_freeze, →1 as T drops."""
+    s = max(float(soft_c), 1e-3)
+    return torch.sigmoid((freeze_c - t_c) / s)
+
+
+def current_flux_W_m2(
+    t_k: torch.Tensor,
+    dt_curr_c: torch.Tensor,
+    greenhouse_factor: float,
+) -> torch.Tensor:
+    """Q_curr = (4 σ T^3 / G) ΔT so linearized equilibrium offset ≈ ΔT."""
+    g = max(float(greenhouse_factor), 1e-6)
+    t = t_k.clamp(min=T_K_FLOOR)
+    return (4.0 * SIGMA * t.pow(3) / g) * dt_curr_c
+
+
+def transport_flux_W_m2(
+    t_c: torch.Tensor,
+    lat_deg: torch.Tensor,
+    transport_lambda: float,
+) -> torch.Tensor:
+    """Q_transport = λ (T̄_global − T_local); λ in W/m²/K. Area-weighted mean is energy-conserving."""
+    lam = float(transport_lambda)
+    if lam == 0.0:
+        return torch.zeros_like(t_c)
+    t_bar = area_weighted_mean(t_c, lat_deg)
+    return lam * (t_bar - t_c)
+
+
+def implicit_energy_step(
+    t_c: torch.Tensor,
+    q_abs: torch.Tensor,
+    c_eff: torch.Tensor,
+    dt_s: float = MONTH_DT_S,
+    greenhouse_factor: float = TEMPERATURE.greenhouse_factor,
+) -> torch.Tensor:
+    """T_new = T + (Q_abs - σT^4/G) / (C/Δt + 4σT^3/G), T in °C on the grid."""
+    g = max(float(greenhouse_factor), 1e-6)
+    t_k = (t_c + 273.15).clamp(min=T_K_FLOOR)
+    olr = SIGMA * t_k.pow(4) / g
+    dolr = 4.0 * SIGMA * t_k.pow(3) / g
+    c = c_eff.clamp(min=1.0)
+    t_new_k = t_k + (q_abs - olr) / (c / float(dt_s) + dolr)
+    return t_new_k - 273.15
 
 
 def box_filter_wrap_lon(field: torch.Tensor, ry: int, rx: int) -> torch.Tensor:
@@ -198,18 +474,17 @@ def kernel_radius_px(
     return ry, rx
 
 
-def small_inland_lake_mask(
+def inland_lake_area_km2(
     land: torch.Tensor | np.ndarray,
     *,
-    planet_radius_km: float = 6371.0,
-    max_area_km2: float = 20_000.0,
+    planet_radius_km: float = PLANET.radius_km,
+    max_area_km2: float = TEMPERATURE.lake_max_area_km2,
 ) -> torch.Tensor:
     """
-    True on water cells that belong to inland lakes smaller than ``max_area_km2``.
+    Per-cell spherical area (km²) of inland lakes ≤ ``max_area_km2``; 0 elsewhere.
 
     Water connected components (8-neighbour, longitude wraps). The largest
-    component is treated as the world ocean; any other component whose
-    equatorial-pixel-equivalent area is ≤ ``max_area_km2`` is a small inland lake.
+    component is the world ocean. Cell area is ``dy · dx_eq · cos(φ)``.
     """
     from scipy import ndimage
 
@@ -222,13 +497,14 @@ def small_inland_lake_mask(
 
     water = ~land_np
     h, w = water.shape
+    z = torch.zeros((h, w), device=device, dtype=torch.float32)
     if not water.any():
-        return torch.zeros((h, w), device=device, dtype=torch.bool)
+        return z
 
     struct = ndimage.generate_binary_structure(2, 2)
     labeled, nlab = ndimage.label(water, structure=struct)
     if nlab == 0:
-        return torch.zeros((h, w), device=device, dtype=torch.bool)
+        return z
 
     # Merge labels that touch across the antimeridian (lon wrap).
     left = labeled[:, 0]
@@ -250,7 +526,6 @@ def small_inland_lake_mask(
         remap = np.zeros(nlab + 1, dtype=np.int32)
         for i in range(1, nlab + 1):
             remap[i] = find(i)
-        # Reindex to 1..K
         uniq = {0: 0}
         next_id = 1
         for i in range(1, nlab + 1):
@@ -262,203 +537,94 @@ def small_inland_lake_mask(
         labeled = remap[labeled]
         nlab = next_id - 1
 
-    counts = np.bincount(labeled.ravel(), minlength=nlab + 1)
-    counts[0] = 0
-    if nlab == 0 or counts.max() == 0:
-        return torch.zeros((h, w), device=device, dtype=torch.bool)
+    lat_np = 90.0 - (np.arange(h, dtype=np.float64) + 0.5) * (180.0 / h)
+    cos_row = np.clip(np.cos(np.deg2rad(lat_np)), 0.0, 1.0)
+    cell_w = np.broadcast_to(cos_row[:, None], (h, w))
+    area_w = np.bincount(
+        labeled.ravel(), weights=cell_w.ravel(), minlength=nlab + 1
+    )
+    area_w[0] = 0.0
+    if nlab == 0 or float(area_w.max()) == 0.0:
+        return z
 
-    ocean_id = int(np.argmax(counts))
-    # Equatorial pixel area (km²); conservative upper bound on true cell area.
+    ocean_id = int(np.argmax(area_w))
     km_per_deg = (np.pi * float(planet_radius_km)) / 180.0
     dy_km = (180.0 / h) * km_per_deg
     dx_eq = (360.0 / w) * km_per_deg
-    px_km2 = float(dy_km * dx_eq)
-    max_px = max(1, int(float(max_area_km2) / max(px_km2, 1e-6)))
-
-    small_ids = [
-        i
-        for i in range(1, nlab + 1)
-        if i != ocean_id and 0 < int(counts[i]) <= max_px
-    ]
-    if not small_ids:
-        return torch.zeros((h, w), device=device, dtype=torch.bool)
-
-    mask_np = np.isin(labeled, np.asarray(small_ids, dtype=np.int32))
-    return torch.as_tensor(mask_np, device=device, dtype=torch.bool)
+    area_km2 = area_w * float(dy_km * dx_eq)
+    area_map = area_km2[labeled]
+    keep = (labeled != ocean_id) & (area_map > 0.0) & (area_map <= float(max_area_km2))
+    area_map = np.where(keep, area_map, 0.0).astype(np.float32)
+    return torch.as_tensor(area_map, device=device, dtype=torch.float32)
 
 
-def diffuse_ocean_influence(
-    open_water: torch.Tensor,
+def small_inland_lake_mask(
+    land: torch.Tensor | np.ndarray,
+    *,
+    planet_radius_km: float = PLANET.radius_km,
+    max_area_km2: float = TEMPERATURE.lake_max_area_km2,
+) -> torch.Tensor:
+    """True on inland-lake cells whose spherical area is ≤ ``max_area_km2``."""
+    return inland_lake_area_km2(
+        land, planet_radius_km=planet_radius_km, max_area_km2=max_area_km2
+    ) > 0
+
+
+def lake_inertia_from_area_km2(
+    area_km2: torch.Tensor,
+    *,
+    small_km2: float = TEMPERATURE.lake_small_area_km2,
+    large_km2: float = TEMPERATURE.lake_max_area_km2,
+    inertia_small: float = TEMPERATURE.lake_inertia,
+    inertia_large: float = 1.0,
+) -> torch.Tensor:
+    """Linear coefficient: ``inertia_small`` at ``small_km2``, ``inertia_large`` (≤1) at ``large_km2``."""
+    lo = min(float(small_km2), float(large_km2))
+    hi = max(float(small_km2), float(large_km2))
+    span = max(hi - lo, 1e-6)
+    t = ((area_km2 - lo) / span).clamp(0.0, 1.0)
+    i0 = float(np.clip(inertia_small, 0.0, 1.0))
+    i1 = float(np.clip(inertia_large, 0.0, 1.0))
+    return i0 + t * (i1 - i0)
+
+
+def diffuse_field(
+    field: torch.Tensor,
     lat: torch.Tensor,
     *,
     planet_radius_km: float,
     length_km: float,
     passes: int = 6,
 ) -> torch.Tensor:
-    """
-    Heat-diffusion coastal buffer on GPU.
-
-    Starts from an open-water mask (1=source, 0=land/ice) and applies repeated
-    separable mean filters (≈ Gaussian / thermal diffusion). On land this
-    yields a smooth 1→0 ocean-influence field — physically closer to heat /
-    moisture dissipation than a hard Euclidean distance falloff.
-    """
-    h, w = open_water.shape
-    x = open_water.clamp(0.0, 1.0)
+    """Repeated metric mean filters ≈ heat diffusion (no 0–1 clamp)."""
+    h, w = field.shape
+    x = field
     n = max(1, int(passes))
-    # n box filters of half-width R ≈ Gaussian with σ ≈ R*sqrt(n/3).
-    # Choose R so the RMS spread matches length_km on this grid.
     r_km = max(float(length_km) * (3.0 / float(n)) ** 0.5, 20.0)
-    # Mild high-latitude compression of E–W mixing (narrower longitude km/px)
-    cos_lat = torch.cos(torch.deg2rad(lat)).abs().clamp(0.25, 1.0)
-    lat_scale = float(cos_lat.mean().item())
 
     for _ in range(n):
         ry, rx = kernel_radius_px(h, w, r_km, planet_radius_km)
-        rx = max(1, int(round(rx * lat_scale)))
-        # Cap extreme kernels on tiny test grids / memory; multi-pass still spreads
         ry = min(max(ry, 1), max(3, h // 4))
         rx = min(max(rx, 1), max(3, w // 4))
-        x = box_filter_wrap_lon(x, ry, rx)
-    return x.clamp(0.0, 1.0)
+        x = box_filter_lonlat_metric(x, lat, ry, rx)
+    return x
 
 
-def influence_to_dist_km(influence: torch.Tensor, efold_km: float) -> torch.Tensor:
-    """Map diffusion weight ≈ exp(-d/L) back to a pseudo-distance for callers."""
-    L = max(float(efold_km), 1.0)
-    return (-L * torch.log(influence.clamp(min=1e-6, max=1.0))).clamp(0.0, L * 12.0)
-
-
-def maritime_from_open_water(
-    open_water: torch.Tensor,
-    lat: torch.Tensor,
-    *,
-    planet_radius_km: float,
-    neighbor_radius_km: float,
-    maritime_e_fold_km: float,
-    land: torch.Tensor,
-    diffuse_passes: int = 6,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """
-    Maritime weight from open (unfrozen) water only — GPU diffusion, no EDT.
-
-    Returns (maritime, dist_km_pseudo, near_open).
-    ``dist_km_pseudo`` is inverted from the diffusion field so coastal blend
-    code that expects an e-folding distance keeps working.
-    """
-    h, w = open_water.shape
-    ry, rx = kernel_radius_px(h, w, neighbor_radius_km, planet_radius_km)
-
-    # Local open-water fraction (short-range neighborhood)
-    near = box_filter_wrap_lon(open_water, ry, rx).clamp(0.0, 1.0)
-
-    # Long-range coastal buffer via repeated mean filters (heat diffusion)
-    # Reach several e-folds so continental interiors can still feel weak maritime
-    ocean_inf = diffuse_ocean_influence(
-        open_water,
-        lat,
-        planet_radius_km=planet_radius_km,
-        length_km=max(maritime_e_fold_km * 3.0, neighbor_radius_km),
-        passes=diffuse_passes,
-    )
-
-    maritime = (0.55 * near + 0.45 * ocean_inf).clamp(0.0, 1.0)
-    dist_km = influence_to_dist_km(ocean_inf, maritime_e_fold_km)
-
-    # Over open water itself: strong maritime; frozen water / land: from proximity
-    maritime = torch.where(
-        land,
-        maritime,
-        torch.maximum(maritime * open_water, open_water * 0.92),
-    )
-    return maritime, dist_km, near
-
-
-def earthlike_sst_profile_C(lat_deg: torch.Tensor) -> torch.Tensor:
-    """
-    Approximate Earth zonal-mean annual SST (C) vs latitude.
-    Equator ~27-28 C; polar seas near -1.8 C.
-    """
-    phi = torch.deg2rad(lat_deg)
-    cos_lat = torch.cos(phi).clamp(0.0, 1.0)
-    sst = 27.5 * torch.pow(cos_lat, 1.25) - 0.8
-    sst = sst - 2.5 * soft_step(lat_deg.abs(), 55.0, 12.0)
-    return sst.clamp(-1.8, 29.5)
-
-
-def earthlike_sst_month_C(lat_deg: torch.Tensor, decl_deg: float) -> torch.Tensor:
-    """Annual SST profile + modest midlatitude seasonal swing (weak inside polar circles)."""
-    ann = earthlike_sst_profile_C(lat_deg)
-    phi = torch.deg2rad(lat_deg)
-    season = float(np.sin(np.deg2rad(decl_deg)))
-    mid = torch.exp(-0.5 * ((lat_deg.abs() - 42.0) / 16.0) ** 2)
-    # Gate out seasonal SST swing poleward of ~60° (polar oceans stay near annual)
-    polar_gate = 1.0 - soft_step(lat_deg.abs(), 58.0, 8.0)
-    d_t = 3.5 * season * torch.sin(phi) * mid * polar_gate
-    return (ann + d_t).clamp(-1.8, 30.5)
-
-
-def masked_local_mean(
-    field: torch.Tensor,
-    weight: torch.Tensor,
-    ry: int,
-    rx: int,
-    eps: float = 1e-4,
-) -> torch.Tensor:
-    """Neighborhood mean of field using soft mask weights (lon wraps)."""
-    num = box_filter_wrap_lon(field * weight, ry, rx)
-    den = box_filter_wrap_lon(weight, ry, rx).clamp_min(eps)
-    return num / den
-
-
-def blend_coastal_temperatures(
+def anti_alias_coast(
     t_c: torch.Tensor,
     land: torch.Tensor,
-    open_water: torch.Tensor,
-    dist_km: torch.Tensor,
+    lat: torch.Tensor,
     *,
-    planet_radius_km: float,
-    coast_blend_km: float,
-    ocean_mix_km: float,
-    land_pull: float,
-    ocean_pull: float,
+    aa_blend_px: int,
 ) -> torch.Tensor:
-    """
-    Light coastal continuity + ocean mixing.
-
-    Allows a few C of land-sea contrast at the shore and a smooth inland
-    fade. Avoids forcing coastal land onto SST (that over-cooled/warmed
-    coasts and created an inland jump where a hard blend cut off).
-    """
-    h, w = t_c.shape
-    ry_c, rx_c = kernel_radius_px(h, w, max(35.0, coast_blend_km), planet_radius_km)
-    ry_o, rx_o = kernel_radius_px(h, w, ocean_mix_km, planet_radius_km)
-
-    land_f = land.float()
-    water = 1.0 - land_f
-    ow = open_water.clamp(0.0, 1.0)
-
-    local_ocean = masked_local_mean(t_c, ow.clamp_min(1e-4), ry_o, rx_o)
-    local_any_water = masked_local_mean(t_c, water.clamp_min(1e-4), ry_c, rx_c)
-
-    efold = max(coast_blend_km, 1.0)
-    shore = torch.exp(-dist_km / efold)
-    near_ow = box_filter_wrap_lon(ow, max(1, ry_c // 3), max(1, rx_c // 3)).clamp(0.0, 1.0)
-
-    # Modest land -> nearby water pull (cap ~0.4 so coasts keep distinct climate)
-    land_w = (land_f * shore * land_pull * (0.35 + 0.65 * near_ow)).clamp(0.0, 0.42)
-    out = t_c * (1.0 - land_w) + local_any_water * land_w
-
-    ocean_w = (water * ow * ocean_pull).clamp(0.0, 0.70)
-    out = out * (1.0 - ocean_w) + local_ocean * ocean_w
-
-    closed = water * (1.0 - ow)
-    if float(closed.max().item()) > 0.0:
-        local_closed = masked_local_mean(t_c, closed + 1e-3 * water, ry_o, rx_o)
-        cw = (closed * 0.25 * shore.clamp_min(0.15)).clamp(0.0, 0.35)
-        out = out * (1.0 - cw) + local_closed * cw
-
-    return out
+    """1-ish pixel coast mix: edge = 4s(1-s) against a metric box blur."""
+    px = max(int(aa_blend_px), 0)
+    if px <= 0:
+        return t_c
+    soft = box_filter_lonlat_metric(land.float(), lat, px, px).clamp(0.0, 1.0)
+    edge = (4.0 * soft * (1.0 - soft)).clamp(0.0, 1.0)
+    blur = box_filter_lonlat_metric(t_c, lat, px, px)
+    return t_c * (1.0 - edge) + blur * edge
 
 
 def synthesize_temperatures(
@@ -466,50 +632,47 @@ def synthesize_temperatures(
     land_np: np.ndarray,
     *,
     device: torch.device,
-    s0: float,
-    obliquity_deg: float,
-    max_elev_m: float,
-    lapse_k_per_km: float,
-    planet_radius_km: float,
-    neighbor_radius_km: float,
-    maritime_e_fold_km: float,
-    greenhouse_factor: float,
-    heat_transport: float,
-    albedo_ocean: float,
-    albedo_land: float,
-    albedo_ice: float,
-    ice_threshold_C: float,
-    freeze_C: float,
-    freeze_soft_C: float,
-    ocean_inertia: float,
-    land_inertia: float,
-    continentality_amp: float,
-    coast_blend_km: float = 150.0,
-    ocean_mix_km: float = 450.0,
-    coast_land_pull: float = 0.50,
-    coast_ocean_pull: float = 0.45,
-    ocean_sst_nudge: float = 0.55,
-    maritime_iters: int = 2,
-    maritime_diffuse_passes: int = 6,
-    lake_inertia: float = 0.60,
-    lake_max_area_km2: float = 20_000.0,
-    currents: bool = True,
-    current_warm_delta_C: float = 4.5,
-    current_cold_delta_C: float = -4.5,
-    current_peak_lat_deg: float = 30.0,
-    current_lat_sigma_deg: float = 12.0,
-    current_reach_km: float = 450.0,
+    s0: float = PLANET.s0,
+    obliquity_deg: float = PLANET.obliquity_deg,
+    max_elev_m: float = PLANET.max_elev_m,
+    lapse_k_per_km: float = PLANET.lapse_k_per_km,
+    planet_radius_km: float = PLANET.radius_km,
+    maritime_e_fold_km: float = TEMPERATURE.maritime_e_fold_km,
+    greenhouse_factor: float = TEMPERATURE.greenhouse_factor,
+    transport_lambda: float = TEMPERATURE.transport_lambda,
+    albedo_ocean: float = TEMPERATURE.albedo_ocean,
+    albedo_land: float = TEMPERATURE.albedo_land,
+    albedo_ice: float = TEMPERATURE.albedo_ice,
+    maritime_diffuse_passes: int = TEMPERATURE.maritime_diffuse_passes,
+    heat_capacity_land: float = TEMPERATURE.heat_capacity_land,
+    heat_capacity_ocean: float = TEMPERATURE.heat_capacity_ocean,
+    inertia_shallow: float = TEMPERATURE.inertia_shallow,
+    inertia_deep: float = TEMPERATURE.inertia_deep,
+    mix_depth_m: float = TEMPERATURE.mix_depth_m,
+    lake_inertia: float = TEMPERATURE.lake_inertia,
+    lake_small_area_km2: float = TEMPERATURE.lake_small_area_km2,
+    lake_max_area_km2: float = TEMPERATURE.lake_max_area_km2,
+    freeze_land_C: float = TEMPERATURE.freeze_land_C,
+    freeze_ocean_C: float = TEMPERATURE.freeze_ocean_C,
+    freeze_latent_delta_C: float = TEMPERATURE.freeze_latent_delta_C,
+    latent_ice_m: float = TEMPERATURE.latent_ice_m,
+    ice_albedo_soft_C: float = TEMPERATURE.ice_albedo_soft_C,
+    spinup_years: int = TEMPERATURE.spinup_years,
+    t_init_K: float = TEMPERATURE.t_init_K,
+    aa_blend_px: int = TEMPERATURE.aa_blend_px,
+    currents: bool = TEMPERATURE.currents,
+    current_warm_delta_C: float = CURRENTS.warm_delta_C,
+    current_cold_delta_C: float = CURRENTS.cold_delta_C,
+    current_peak_lat_deg: float = CURRENTS.peak_lat_deg,
+    current_lat_sigma_deg: float = CURRENTS.lat_sigma_deg,
+    current_reach_km: float = CURRENTS.reach_km,
 ) -> tuple[np.ndarray, np.ndarray, dict]:
     """
-    Returns monthly (12,H,W) float32 C, annual (H,W) float32 C, meta dict.
+    Returns last-year monthly (12,H,W) float32 °C, annual (H,W) float32 °C, meta.
 
-    Open-ocean maritime influence is monthly: water with that month's
-    temperature <= freeze_C does not count as open ocean for that month.
-    Coastal buffering uses GPU diffusion (no EDT).
-
-    When ``currents`` is True, east-warm / west-cold ocean-current ΔT is
-    computed automatically and added to the base seawater SST targets before
-    ocean nudge / coastal blending (not as a post-pass).
+    Spin-up runs ``spinup_years`` virtual years of month-steps. Only the last
+    12 months are returned. Currents and Newtonian heat transport enter
+    ``Q_abs`` as energy fluxes.
     """
     job_timer = StepTimer("synthesize")
     try:
@@ -522,28 +685,29 @@ def synthesize_temperatures(
             max_elev_m=max_elev_m,
             lapse_k_per_km=lapse_k_per_km,
             planet_radius_km=planet_radius_km,
-            neighbor_radius_km=neighbor_radius_km,
             maritime_e_fold_km=maritime_e_fold_km,
             greenhouse_factor=greenhouse_factor,
-            heat_transport=heat_transport,
+            transport_lambda=transport_lambda,
             albedo_ocean=albedo_ocean,
             albedo_land=albedo_land,
             albedo_ice=albedo_ice,
-            ice_threshold_C=ice_threshold_C,
-            freeze_C=freeze_C,
-            freeze_soft_C=freeze_soft_C,
-            ocean_inertia=ocean_inertia,
-            land_inertia=land_inertia,
-            continentality_amp=continentality_amp,
-            coast_blend_km=coast_blend_km,
-            ocean_mix_km=ocean_mix_km,
-            coast_land_pull=coast_land_pull,
-            coast_ocean_pull=coast_ocean_pull,
-            ocean_sst_nudge=ocean_sst_nudge,
-            maritime_iters=maritime_iters,
             maritime_diffuse_passes=maritime_diffuse_passes,
+            heat_capacity_land=heat_capacity_land,
+            heat_capacity_ocean=heat_capacity_ocean,
+            inertia_shallow=inertia_shallow,
+            inertia_deep=inertia_deep,
+            mix_depth_m=mix_depth_m,
             lake_inertia=lake_inertia,
+            lake_small_area_km2=lake_small_area_km2,
             lake_max_area_km2=lake_max_area_km2,
+            freeze_land_C=freeze_land_C,
+            freeze_ocean_C=freeze_ocean_C,
+            freeze_latent_delta_C=freeze_latent_delta_C,
+            latent_ice_m=latent_ice_m,
+            ice_albedo_soft_C=ice_albedo_soft_C,
+            spinup_years=spinup_years,
+            t_init_K=t_init_K,
+            aa_blend_px=aa_blend_px,
             currents=currents,
             current_warm_delta_C=current_warm_delta_C,
             current_cold_delta_C=current_cold_delta_C,
@@ -556,6 +720,7 @@ def synthesize_temperatures(
         release_torch_memory()
 
 
+
 def _synthesize_temperatures_impl(
     elev01: np.ndarray,
     land_np: np.ndarray,
@@ -566,28 +731,29 @@ def _synthesize_temperatures_impl(
     max_elev_m: float,
     lapse_k_per_km: float,
     planet_radius_km: float,
-    neighbor_radius_km: float,
     maritime_e_fold_km: float,
     greenhouse_factor: float,
-    heat_transport: float,
+    transport_lambda: float,
     albedo_ocean: float,
     albedo_land: float,
     albedo_ice: float,
-    ice_threshold_C: float,
-    freeze_C: float,
-    freeze_soft_C: float,
-    ocean_inertia: float,
-    land_inertia: float,
-    continentality_amp: float,
-    coast_blend_km: float,
-    ocean_mix_km: float,
-    coast_land_pull: float,
-    coast_ocean_pull: float,
-    ocean_sst_nudge: float,
-    maritime_iters: int,
     maritime_diffuse_passes: int,
+    heat_capacity_land: float,
+    heat_capacity_ocean: float,
+    inertia_shallow: float,
+    inertia_deep: float,
+    mix_depth_m: float,
     lake_inertia: float,
+    lake_small_area_km2: float,
     lake_max_area_km2: float,
+    freeze_land_C: float,
+    freeze_ocean_C: float,
+    freeze_latent_delta_C: float,
+    latent_ice_m: float,
+    ice_albedo_soft_C: float,
+    spinup_years: int,
+    t_init_K: float,
+    aa_blend_px: int,
     currents: bool,
     current_warm_delta_C: float,
     current_cold_delta_C: float,
@@ -600,38 +766,65 @@ def _synthesize_temperatures_impl(
     land = torch.from_numpy(land_np.astype(np.bool_)).to(device=device)
     h, w = elev.shape
     lat = latitude_grid(h, device)
-    abs_lat = lat.abs()
 
-    elev_m = torch.where(land, (elev - 0.5) / 0.5 * max_elev_m, torch.zeros_like(elev))
-    elev_m = elev_m.clamp(0.0, max_elev_m)
-    lapse_raw = lapse_k_per_km * (elev_m / 1000.0)
+    elev_land = torch.where(
+        land, (elev - 0.5) / 0.5 * max_elev_m, torch.zeros_like(elev)
+    ).clamp(0.0, max_elev_m)
+    depth_m = torch.where(
+        ~land, (0.5 - elev) / 0.5 * max_elev_m, torch.zeros_like(elev)
+    ).clamp(0.0, max_elev_m)
+    lapse = float(lapse_k_per_km) * (elev_land / 1000.0)
 
-    small_lake = small_inland_lake_mask(
+    lake_area = inland_lake_area_km2(
         land,
         planet_radius_km=planet_radius_km,
         max_area_km2=lake_max_area_km2,
     )
-    lake_inertia_f = float(np.clip(lake_inertia, 0.0, 0.97))
+    is_lake = lake_area > 0
+    world_ocean = (~land) & (~is_lake)
+    lake_coeff = lake_inertia_from_area_km2(
+        lake_area,
+        small_km2=lake_small_area_km2,
+        large_km2=lake_max_area_km2,
+        inertia_small=lake_inertia,
+        inertia_large=1.0,
+    )
+    i_z = depth_inertia(
+        depth_m,
+        inertia_shallow=inertia_shallow,
+        inertia_deep=inertia_deep,
+        mix_depth_m=mix_depth_m,
+    )
+    c_water = float(heat_capacity_ocean) * i_z
+    c_base = torch.where(land, torch.full_like(elev, float(heat_capacity_land)), c_water)
+    c_base = torch.where(is_lake, lake_coeff * c_water, c_base)
 
-    ry_s, rx_s = kernel_radius_px(h, w, max(25.0, coast_blend_km * 0.4), planet_radius_km)
-    land_soft = box_filter_wrap_lon(land.float(), ry_s, rx_s).clamp(0.0, 1.0)
-    water_soft = 1.0 - land_soft
+    freeze_map = torch.where(
+        land | is_lake,
+        torch.full_like(elev, float(freeze_land_C)),
+        torch.full_like(elev, float(freeze_ocean_C)),
+    )
+    c_peak = latent_peak_J_m2_K(latent_ice_m, freeze_latent_delta_C)
+    bare_albedo = torch.where(
+        land,
+        torch.full_like(elev, float(albedo_land)),
+        torch.full_like(elev, float(albedo_ocean)),
+    )
+
+    land_soft = box_filter_lonlat_metric(land.float(), lat, 2, 2).clamp(0.0, 1.0)
 
     declinations = solar_declination_deg(MID_MONTH_DOY, obliquity_deg)
     q_months = torch.empty((12, h, w), device=device, dtype=torch.float32)
-    sst_targets = torch.empty((12, h, w), device=device, dtype=torch.float32)
     for m, dec in enumerate(declinations):
         q_row = daily_mean_toa_insolation(lat, float(dec), s0=s0)
         q_months[m] = q_row[:, None].expand(h, w)
-        sst_row = earthlike_sst_month_C(lat, float(dec))
-        sst_targets[m] = sst_row[:, None].expand(h, w)
 
-    # Ocean currents → base seawater SST target (coast edge filter, mid-lat Gaussian)
+    dt_curr = torch.zeros((h, w), device=device, dtype=torch.float32)
     currents_meta: dict | None = None
     if currents:
         from .currents import OceanCurrentFilter
 
-        print("  ocean currents → SST targets…", flush=True)
+        print("  ocean currents → Q_abs flux…", flush=True)
         curr_filt = OceanCurrentFilter(
             peak_lat_deg=current_peak_lat_deg,
             lat_sigma_deg=current_lat_sigma_deg,
@@ -639,132 +832,78 @@ def _synthesize_temperatures_impl(
             cold_delta_C=current_cold_delta_C,
             reach_km=current_reach_km,
             planet_radius_km=planet_radius_km,
-            land_bleed=0.0,  # SST targets are ocean-only
+            land_bleed=0.0,
             enabled=True,
         )
         curr_corr = curr_filt.compute(land, lat)
-        ocean_m = (~land).float()
-        sst_targets = sst_targets + curr_corr.temperature_C[None] * ocean_m[None]
-        sst_targets = sst_targets.clamp(-1.8, 32.0)
+        dt_curr = curr_corr.temperature_C * world_ocean.float()
         currents_meta = dict(curr_corr.meta)
-        del curr_corr, curr_filt, ocean_m
+        del curr_corr, curr_filt
         print(
             f"    currents dT ocean "
             f"[{currents_meta.get('dT_min_C'):.2f}, {currents_meta.get('dT_max_C'):.2f}] C",
             flush=True,
         )
 
-    q_annual = q_months.mean(dim=0)
-    q_ann_eff = apply_heat_transport(q_annual, heat_transport)
-
-    tropics_w = soft_tropics_weight(abs_lat, obliquity_deg)[:, None].expand(h, w)
-    dry_w = soft_subtropical_dry(abs_lat, obliquity_deg)[:, None].expand(h, w)
-    water = (~land).float()
-
-    open_water = water[None].expand(12, h, w).clone()
+    n_years = max(1, int(spinup_years))
+    n_steps = n_years * 12
+    t_c = torch.full(
+        (h, w), float(t_init_K) - 273.15, device=device, dtype=torch.float32
+    )
     monthly = torch.empty((12, h, w), device=device, dtype=torch.float32)
-    dist_km_ref = torch.zeros((h, w), device=device, dtype=torch.float32)
-    maritime_ref = torch.zeros((h, w), device=device, dtype=torch.float32)
+    month_timer = StepTimer("month", total_steps=n_steps)
 
-    n_iters = max(1, maritime_iters)
-    month_timer = StepTimer("month", total_steps=n_iters * 12)
+    print(f"  spin-up {n_years} year(s) ({n_steps} month_steps)…", flush=True)
+    for step in range(n_steps):
+        m = step % 12
+        year = step // 12 + 1
+        step_name = f"y{year}m{m + 1}"
+        month_timer.begin(step_name)
 
-    for it in range(n_iters):
-        print(f"  maritime iter {it + 1}/{n_iters}…", flush=True)
-        albedo = albedo_land * land_soft + albedo_ocean * water_soft
-        t_rad0 = radiative_temperature_C(q_ann_eff, albedo, greenhouse_factor)
-        ice_lat = soft_step(abs_lat, obliquity_deg + 28.0, 10.0)[:, None].expand(h, w)
-        ice_t = soft_step(
-            torch.full_like(t_rad0, ice_threshold_C) - t_rad0, 0.0, 4.0
+        ice_w = ice_albedo_weight(t_c, freeze_map, ice_albedo_soft_C)
+        albedo = (bare_albedo + ice_w * (float(albedo_ice) - bare_albedo)).clamp(0.0, 0.95)
+        c_lat = latent_heat_capacity(
+            t_c, freeze_map, freeze_latent_delta_C, peak=c_peak
         )
-        ice_w = torch.clamp(
-            ice_lat * ice_t * (0.85 * land_soft + 0.25 * water_soft), 0.0, 1.0
+        c_eff = c_base + c_lat
+        t_k = (t_c + 273.15).clamp(min=T_K_FLOOR)
+        q_curr = current_flux_W_m2(t_k, dt_curr, greenhouse_factor)
+        q_trans = transport_flux_W_m2(t_c, lat, transport_lambda)
+        q_abs = (1.0 - albedo) * q_months[m] + q_curr + q_trans
+        t_c = implicit_energy_step(
+            t_c, q_abs, c_eff, MONTH_DT_S, greenhouse_factor
         )
-        albedo = (albedo + ice_w * (albedo_ice - albedo)).clamp(0.0, 0.95)
-        t_rad = radiative_temperature_C(q_ann_eff, albedo, greenhouse_factor)
-
-        for m in range(12):
-            step_name = f"i{it+1}m{m+1}"
-            month_timer.begin(step_name)
-            maritime, dist_km, _near = maritime_from_open_water(
-                open_water[m],
-                lat,
-                planet_radius_km=planet_radius_km,
-                neighbor_radius_km=neighbor_radius_km,
-                maritime_e_fold_km=maritime_e_fold_km,
-                land=land,
-                diffuse_passes=maritime_diffuse_passes,
-            )
-            if m == 5:
-                dist_km_ref = dist_km
-                maritime_ref = maritime
-
-            coast_prox = torch.exp(-dist_km / max(coast_blend_km * 0.8, 1.0))
-            lapse = lapse_raw * (1.0 - 0.35 * coast_prox * land.float())
-
-            inland = (1.0 - maritime) * land_soft
-            # Tropics boost mainly on land; oceans follow SST climatology
-            geo = (
-                3.2 * tropics_w * land_soft
-                + 0.6 * tropics_w * water_soft
-                + 1.8 * dry_w * inland
-                - 1.2 * inland * (abs_lat[:, None] / 90.0)
-            )
-
-            sens = (
-                0.070 * (1.0 - maritime) * land_soft
-                + 0.018 * maritime
-                + 0.028 * land_soft * (1.0 - 0.65 * maritime)
-            )
-            sens = sens * (
-                1.0 + continentality_amp * (1.0 - maritime) * land_soft * 0.30
-            )
-            sens = sens * (1.0 - 0.40 * water_soft * maritime)
-            # Polar oceans: damp insolation-driven seasonal swing (ice / deep mixed layer)
-            polar_w = soft_step(abs_lat, 58.0, 8.0)[:, None].expand(h, w)
-            sens = sens * (1.0 - 0.75 * polar_w * water_soft)
-            inertia = land_inertia + (ocean_inertia - land_inertia) * maritime
-            inertia = torch.clamp(inertia + 0.08 * polar_w * water_soft, 0.0, 0.97)
-            # Small inland lakes: lower thermal inertia than deep ocean
-            if bool(small_lake.any()):
-                inertia = torch.where(small_lake, torch.full_like(inertia, lake_inertia_f), inertia)
-
-            dq = q_months[m] - q_annual
-            d_t = sens * dq * (1.0 - 0.55 * inertia)
-            t_phys = t_rad + geo + d_t - lapse
-
-            nudge = float(np.clip(ocean_sst_nudge, 0.0, 1.0))
-            t_ocean = (1.0 - nudge) * t_phys + nudge * sst_targets[m]
-            t_ocean = torch.maximum(t_ocean, torch.full_like(t_ocean, -1.8))
-            monthly[m] = torch.where(land, t_phys, t_ocean)
-
-            monthly[m] = blend_coastal_temperatures(
-                monthly[m],
-                land,
-                open_water[m],
-                dist_km,
-                planet_radius_km=planet_radius_km,
-                coast_blend_km=coast_blend_km,
-                ocean_mix_km=ocean_mix_km,
-                land_pull=coast_land_pull,
-                ocean_pull=coast_ocean_pull,
-            )
-            if device.type == "cuda":
-                torch.cuda.synchronize()
-            dt = month_timer.end() or 0.0
-            print(
-                f"    month {m + 1}/12  "
-                f"{month_timer.progress_line(last_name=step_name, last_dt=dt)}",
-                flush=True,
-            )
-
-        open_water = water[None] * soft_step(monthly, freeze_C, freeze_soft_C)
-
+        t_sl = t_c + lapse
+        t_sl = diffuse_field(
+            t_sl,
+            lat,
+            planet_radius_km=planet_radius_km,
+            length_km=maritime_e_fold_km,
+            passes=maritime_diffuse_passes,
+        )
+        t_c = t_sl - lapse
+        if step >= n_steps - 12:
+            monthly[m] = t_c
         if device.type == "cuda":
             torch.cuda.synchronize()
+        dt = month_timer.end() or 0.0
+        print(
+            f"    year {year}/{n_years}  month {m + 1}/12  "
+            f"{month_timer.progress_line(last_name=step_name, last_dt=dt)}",
+            flush=True,
+        )
+
+    for m in range(12):
+        monthly[m] = anti_alias_coast(
+            monthly[m], land, lat, aa_blend_px=aa_blend_px
+        )
 
     annual = monthly.mean(dim=0)
-    open_frac_monthly = [float(open_water[m].mean().item()) for m in range(12)]
+    ice_w_m = ice_albedo_weight(monthly, freeze_map[None], ice_albedo_soft_C)
+    open_water = (~land).float()[None] * (1.0 - ice_w_m)
+    open_frac_monthly = [
+        float(area_weighted_mean(open_water[m], lat).item()) for m in range(12)
+    ]
 
     lat2 = lat[:, None].expand(h, w)
     eq = (~land) & (lat2.abs() < 10.0)
@@ -785,63 +924,87 @@ def _synthesize_temperatures_impl(
     meta = {
         "device": str(device),
         "declination_deg": declinations.tolist(),
-        "q_annual_mean_W_m2": float(q_annual.mean().item()),
-        "q_annual_max_W_m2": float(q_annual.max().item()),
-        "t_annual_mean_C": float(annual.mean().item()),
+        "q_annual_mean_W_m2": float(area_weighted_mean(q_months.mean(dim=0), lat).item()),
+        "q_annual_max_W_m2": float(q_months.mean(dim=0).max().item()),
+        "t_annual_mean_C": float(area_weighted_mean(annual, lat).item()),
         "t_annual_min_C": float(annual.min().item()),
         "t_annual_max_C": float(annual.max().item()),
-        "t_land_mean_C": float(annual[land].mean().item()),
-        "t_ocean_mean_C": float(annual[~land].mean().item()),
-        "t_ocean_eq_mean_C": float(annual[eq].mean().item()) if bool(eq.any()) else None,
-        "t_ocean_polar_mean_C": float(annual[pol].mean().item()) if bool(pol.any()) else None,
-        "amp_jul_jan_land_mean_C": float(amp[land].mean().item()) if land.any() else 0.0,
-        "amp_jul_jan_ocean_mean_C": float(amp[~land].mean().item()) if (~land).any() else 0.0,
-        "open_water_frac_mean": float(open_water.mean().item()),
+        "t_land_mean_C": float(area_weighted_mean(annual, lat, mask=land).item()),
+        "t_ocean_mean_C": float(area_weighted_mean(annual, lat, mask=~land).item()),
+        "t_ocean_eq_mean_C": (
+            float(area_weighted_mean(annual, lat, mask=eq).item()) if bool(eq.any()) else None
+        ),
+        "t_ocean_polar_mean_C": (
+            float(area_weighted_mean(annual, lat, mask=pol).item()) if bool(pol.any()) else None
+        ),
+        "amp_jul_jan_land_mean_C": (
+            float(area_weighted_mean(amp, lat, mask=land).item()) if bool(land.any()) else 0.0
+        ),
+        "amp_jul_jan_ocean_mean_C": (
+            float(area_weighted_mean(amp, lat, mask=~land).item()) if bool((~land).any()) else 0.0
+        ),
+        "open_water_frac_mean": float(area_weighted_mean(open_water.mean(dim=0), lat).item()),
         "open_water_frac_monthly": open_frac_monthly,
-        "elev_land_max_m": float(elev_m[land].max().item()) if land.any() else 0.0,
-        "dist_land_mean_km": float(dist_km_ref[land].mean().item()) if land.any() else 0.0,
-        "maritime_land_mean": float(maritime_ref[land].mean().item()) if land.any() else 0.0,
-        "freeze_C": freeze_C,
-        "freeze_rule": "monthly: water with T_month <= freeze_C is not open ocean",
-        "coast_blend_km": coast_blend_km,
-        "ocean_mix_km": ocean_mix_km,
-        "ocean_sst_nudge": ocean_sst_nudge,
-        "maritime_iters": maritime_iters,
-        "maritime_model": "gpu_diffusion",
+        "elev_land_max_m": float(elev_land[land].max().item()) if bool(land.any()) else 0.0,
+        "freeze_land_C": freeze_land_C,
+        "freeze_ocean_C": freeze_ocean_C,
+        "freeze_latent_delta_C": freeze_latent_delta_C,
+        "spinup_years": n_years,
+        "month_steps": n_steps,
+        "transport_lambda": float(transport_lambda),
+        "maritime_e_fold_km": maritime_e_fold_km,
+        "maritime_model": "gpu_diffusion_sea_level_T",
         "maritime_diffuse_passes": maritime_diffuse_passes,
-        "lake_inertia": lake_inertia_f,
-        "lake_max_area_km2": float(lake_max_area_km2),
-        "small_inland_lake_pct": float(100.0 * small_lake.float().mean().item()),
+        "heat_capacity_land": heat_capacity_land,
+        "heat_capacity_ocean": heat_capacity_ocean,
+        "inertia_shallow": inertia_shallow,
+        "inertia_deep": inertia_deep,
+        "mix_depth_m": mix_depth_m,
+        "lake_inertia": lake_inertia,
+        "lake_small_area_km2": lake_small_area_km2,
+        "lake_max_area_km2": lake_max_area_km2,
+        "lake_inertia_note": (
+            f"spherical area dA∝cos(φ); coeff {float(np.clip(lake_inertia, 0.0, 1.0)):.2f}"
+            f"@{float(lake_small_area_km2):.0f}km2 → 1.00@{float(lake_max_area_km2):.0f}km2"
+        ),
+        "small_inland_lake_pct": float(
+            area_weighted_mean(is_lake.float(), lat).item() * 100.0
+        ),
+        "latent_ice_m": latent_ice_m,
+        "ice_albedo_soft_C": ice_albedo_soft_C,
+        "t_init_K": t_init_K,
+        "aa_blend_px": aa_blend_px,
+        "land_soft_mean": float(area_weighted_mean(land_soft, lat).item()),
         "ocean_currents": currents_meta,
         "timing": timing,
     }
 
     monthly_np = monthly.detach().cpu().numpy().astype(np.float32)
     annual_np = annual.detach().cpu().numpy().astype(np.float32)
-
-    # Drop device tensors immediately so VRAM/RAM can be reclaimed before write I/O
     del (
         elev,
         land,
         lat,
-        abs_lat,
-        elev_m,
-        lapse_raw,
+        elev_land,
+        depth_m,
+        lapse,
+        lake_area,
+        is_lake,
+        world_ocean,
+        lake_coeff,
+        i_z,
+        c_water,
+        c_base,
+        freeze_map,
+        bare_albedo,
         land_soft,
-        water_soft,
-        small_lake,
         q_months,
-        sst_targets,
-        q_annual,
-        q_ann_eff,
-        tropics_w,
-        dry_w,
-        water,
-        open_water,
+        dt_curr,
+        t_c,
         monthly,
         annual,
-        dist_km_ref,
-        maritime_ref,
+        ice_w_m,
+        open_water,
         lat2,
         eq,
         pol,
@@ -854,11 +1017,6 @@ def _synthesize_temperatures_impl(
 def temperature_to_gray(t_c: np.ndarray, t_min: float, t_max: float) -> np.ndarray:
     g = (t_c - t_min) / (t_max - t_min) * 255.0
     return np.clip(np.rint(g), 0, 255).astype(np.uint8)
-
-
-def save_gray_png(path: Path, gray: np.ndarray) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    Image.fromarray(gray, mode="L").save(path)
 
 
 def parse_args() -> argparse.Namespace:
@@ -881,93 +1039,94 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=root / "graphs" / "temperature",
     )
-    p.add_argument("--s0", type=float, default=1361.0)
-    p.add_argument("--obliquity", type=float, default=23.5)
-    p.add_argument("--max-elev-m", type=float, default=8000.0)
-    p.add_argument("--lapse", type=float, default=6.5)
-    p.add_argument("--radius-km", type=float, default=6371.0)
-    p.add_argument("--neighbor-radius-km", type=float, default=400.0)
-    p.add_argument("--maritime-efold-km", type=float, default=250.0)
-    p.add_argument("--greenhouse", type=float, default=1.46)
-    p.add_argument("--heat-transport", type=float, default=0.58)
-    p.add_argument("--albedo-ocean", type=float, default=0.11)
-    p.add_argument("--albedo-land", type=float, default=0.18)
-    p.add_argument("--albedo-ice", type=float, default=0.45)
-    p.add_argument("--ice-threshold", type=float, default=-2.0)
+    p.add_argument("--s0", type=float, default=PLANET.s0)
+    p.add_argument("--obliquity", type=float, default=PLANET.obliquity_deg)
+    p.add_argument("--max-elev-m", type=float, default=PLANET.max_elev_m)
+    p.add_argument("--lapse", type=float, default=PLANET.lapse_k_per_km)
+    p.add_argument("--radius-km", type=float, default=PLANET.radius_km)
+    p.add_argument("--maritime-efold-km", type=float, default=TEMPERATURE.maritime_e_fold_km)
     p.add_argument(
-        "--freeze-c",
+        "--greenhouse",
         type=float,
-        default=0.0,
-        help="Water with monthly T at/below this C does not provide maritime influence that month",
+        default=TEMPERATURE.greenhouse_factor,
+        help="G in OLR = σT^4 / G (shortwave is not multiplied)",
     )
     p.add_argument(
-        "--freeze-soft-c",
+        "--transport-lambda",
         type=float,
-        default=1.5,
-        help="Softness (C) of open-water freeze transition",
+        default=TEMPERATURE.transport_lambda,
+        help="λ in Q_transport = λ (T̄_global − T_local) (W/m²/K)",
     )
-    p.add_argument("--maritime-iters", type=int, default=2)
+    p.add_argument("--albedo-ocean", type=float, default=TEMPERATURE.albedo_ocean)
+    p.add_argument("--albedo-land", type=float, default=TEMPERATURE.albedo_land)
+    p.add_argument("--albedo-ice", type=float, default=TEMPERATURE.albedo_ice)
     p.add_argument(
         "--maritime-diffuse-passes",
         type=int,
-        default=6,
-        help="Repeated GPU mean-filter passes for coastal ocean-influence diffusion (replaces EDT)",
+        default=TEMPERATURE.maritime_diffuse_passes,
+        help="Repeated GPU mean-filter passes for sea-level T diffusion",
     )
-    p.add_argument("--ocean-inertia", type=float, default=0.90)
-    p.add_argument("--land-inertia", type=float, default=0.28)
+    p.add_argument(
+        "--heat-capacity-land",
+        type=float,
+        default=TEMPERATURE.heat_capacity_land,
+        help="Land effective heat capacity (J/m²/K)",
+    )
+    p.add_argument(
+        "--heat-capacity-ocean",
+        type=float,
+        default=TEMPERATURE.heat_capacity_ocean,
+        help="Deep-ocean reference heat capacity (J/m²/K)",
+    )
+    p.add_argument("--inertia-shallow", type=float, default=TEMPERATURE.inertia_shallow)
+    p.add_argument("--inertia-deep", type=float, default=TEMPERATURE.inertia_deep)
+    p.add_argument("--mix-depth-m", type=float, default=TEMPERATURE.mix_depth_m)
     p.add_argument(
         "--lake-inertia",
         type=float,
-        default=0.60,
-        help="Thermal inertia on small inland lakes (default 0.6; open ocean uses --ocean-inertia)",
+        default=TEMPERATURE.lake_inertia,
+        help="Inland-lake heat-capacity coefficient at --lake-small-area-km2 (ramps to 1 at --lake-max-area-km2)",
+    )
+    p.add_argument(
+        "--lake-small-area-km2",
+        type=float,
+        default=TEMPERATURE.lake_small_area_km2,
+        help="Inland-lake spherical area (km²) at which coefficient = --lake-inertia",
     )
     p.add_argument(
         "--lake-max-area-km2",
         type=float,
-        default=20_000.0,
-        help="Max connected inland-water area (km²) treated as a small lake",
+        default=TEMPERATURE.lake_max_area_km2,
+        help="Max inland-lake spherical area (km²); coefficient → 1",
     )
-    p.add_argument("--continentality-amp", type=float, default=1.2)
-    p.add_argument(
-        "--coast-blend-km",
-        type=float,
-        default=150.0,
-        help="Land→SST coastal blend e-folding distance (km)",
-    )
-    p.add_argument(
-        "--ocean-mix-km",
-        type=float,
-        default=450.0,
-        help="Ocean horizontal mixing radius (km)",
-    )
-    p.add_argument("--coast-land-pull", type=float, default=0.50)
-    p.add_argument("--coast-ocean-pull", type=float, default=0.45)
-    p.add_argument(
-        "--ocean-sst-nudge",
-        type=float,
-        default=0.55,
-        help="Blend weight of Earth-like SST profile into ocean cells [0,1]",
-    )
+    p.add_argument("--freeze-land-c", type=float, default=TEMPERATURE.freeze_land_C)
+    p.add_argument("--freeze-ocean-c", type=float, default=TEMPERATURE.freeze_ocean_C)
+    p.add_argument("--freeze-latent-delta-c", type=float, default=TEMPERATURE.freeze_latent_delta_C)
+    p.add_argument("--latent-ice-m", type=float, default=TEMPERATURE.latent_ice_m)
+    p.add_argument("--ice-albedo-soft-c", type=float, default=TEMPERATURE.ice_albedo_soft_C)
+    p.add_argument("--spinup-years", type=int, default=TEMPERATURE.spinup_years)
+    p.add_argument("--t-init-k", type=float, default=TEMPERATURE.t_init_K)
+    p.add_argument("--aa-blend-px", type=int, default=TEMPERATURE.aa_blend_px)
     p.add_argument(
         "--currents",
         action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Apply east-warm / west-cold ocean current coastline filter (default: on)",
+        default=TEMPERATURE.currents,
+        help="Add east-warm / west-cold current ΔT as Q_abs flux (default: on)",
     )
-    p.add_argument("--current-warm-c", type=float, default=3.0, help="East-coast warm ΔT (°C)")
-    p.add_argument("--current-cold-c", type=float, default=-3.0, help="West-coast cold ΔT (°C)")
-    p.add_argument("--current-peak-lat", type=float, default=30.0, help="|lat| of max current contrast")
-    p.add_argument("--current-lat-sigma", type=float, default=12.0, help="Gaussian σ (° lat) for mid-lat weight")
-    p.add_argument("--current-reach-km", type=float, default=450.0, help="Current footprint diffusion radius (km)")
-    p.add_argument("--t-gray-min", type=float, default=-60.0)
-    p.add_argument("--t-gray-max", type=float, default=45.0)
+    p.add_argument("--current-warm-c", type=float, default=CURRENTS.warm_delta_C, help="East-coast warm ΔT (°C)")
+    p.add_argument("--current-cold-c", type=float, default=CURRENTS.cold_delta_C, help="West-coast cold ΔT (°C)")
+    p.add_argument("--current-peak-lat", type=float, default=CURRENTS.peak_lat_deg, help="|lat| of max current contrast")
+    p.add_argument("--current-lat-sigma", type=float, default=CURRENTS.lat_sigma_deg, help="Gaussian σ (° lat) for mid-lat weight")
+    p.add_argument("--current-reach-km", type=float, default=CURRENTS.reach_km, help="Current footprint diffusion radius (km)")
+    p.add_argument("--t-gray-min", type=float, default=ENCODE.t_gray_min)
+    p.add_argument("--t-gray-max", type=float, default=ENCODE.t_gray_max)
     p.add_argument("--save-npy", action="store_true")
     p.add_argument("--downsample", type=int, default=1)
     p.add_argument("--cpu", action="store_true", help="Force CPU even if CUDA is available")
     p.add_argument(
         "--wind",
         action=argparse.BooleanOptionalAction,
-        default=True,
+        default=TEMPERATURE.sync_wind,
         help="After temperature, synthesize wind/pressure from T tensors (default: on)",
     )
     return p.parse_args()
@@ -998,14 +1157,21 @@ def main() -> None:
     if elev.shape != land.shape:
         raise SystemExit(f"Shape mismatch: elev {elev.shape} vs land {land.shape}")
 
-    print(f"Grid {elev.shape[1]}x{elev.shape[0]}  land={land.mean()*100:.1f}%")
+    h_g = elev.shape[0]
+    lat_g = 90.0 - (np.arange(h_g, dtype=np.float64) + 0.5) * (180.0 / h_g)
+    print(
+        f"Grid {elev.shape[1]}x{elev.shape[0]}  "
+        f"land={100.0 * area_weighted_mean_np(land.astype(np.float64), lat_g):.1f}%"
+    )
     print(
         f"S0={args.s0} W/m^2  obliquity=+/-{args.obliquity} deg  "
-        f"max_elev={args.max_elev_m} m  freeze<={args.freeze_c} C"
+        f"max_elev={args.max_elev_m} m  spinup={args.spinup_years}y  "
+        f"λ_transport={args.transport_lambda} W/m^2/K  "
+        f"freeze land/ocean={args.freeze_land_c}/{args.freeze_ocean_c} C"
     )
     if args.currents:
         print(
-            f"Ocean currents in SST targets  east=+{args.current_warm_c:.1f}C  "
+            f"Ocean currents in Q_abs  east=+{args.current_warm_c:.1f}C  "
             f"west={args.current_cold_c:.1f}C  peak|lat|={args.current_peak_lat}°"
         )
     else:
@@ -1016,39 +1182,42 @@ def main() -> None:
             elev,
             land,
             device=device,
-            s0=args.s0,
-            obliquity_deg=args.obliquity,
-            max_elev_m=args.max_elev_m,
-            lapse_k_per_km=args.lapse,
-            planet_radius_km=args.radius_km,
-            neighbor_radius_km=args.neighbor_radius_km,
-            maritime_e_fold_km=args.maritime_efold_km,
-            greenhouse_factor=args.greenhouse,
-            heat_transport=args.heat_transport,
-            albedo_ocean=args.albedo_ocean,
-            albedo_land=args.albedo_land,
-            albedo_ice=args.albedo_ice,
-            ice_threshold_C=args.ice_threshold,
-            freeze_C=args.freeze_c,
-            freeze_soft_C=args.freeze_soft_c,
-            ocean_inertia=args.ocean_inertia,
-            land_inertia=args.land_inertia,
-            continentality_amp=args.continentality_amp,
-            coast_blend_km=args.coast_blend_km,
-            ocean_mix_km=args.ocean_mix_km,
-            coast_land_pull=args.coast_land_pull,
-            coast_ocean_pull=args.coast_ocean_pull,
-            ocean_sst_nudge=args.ocean_sst_nudge,
-            maritime_iters=args.maritime_iters,
-            maritime_diffuse_passes=args.maritime_diffuse_passes,
-            lake_inertia=args.lake_inertia,
-            lake_max_area_km2=args.lake_max_area_km2,
-            currents=bool(args.currents),
-            current_warm_delta_C=args.current_warm_c,
-            current_cold_delta_C=args.current_cold_c,
-            current_peak_lat_deg=args.current_peak_lat,
-            current_lat_sigma_deg=args.current_lat_sigma,
-            current_reach_km=args.current_reach_km,
+            **temperature_call_kwargs(
+                s0=args.s0,
+                obliquity_deg=args.obliquity,
+                max_elev_m=args.max_elev_m,
+                lapse_k_per_km=args.lapse,
+                planet_radius_km=args.radius_km,
+                maritime_e_fold_km=args.maritime_efold_km,
+                greenhouse_factor=args.greenhouse,
+                transport_lambda=args.transport_lambda,
+                albedo_ocean=args.albedo_ocean,
+                albedo_land=args.albedo_land,
+                albedo_ice=args.albedo_ice,
+                maritime_diffuse_passes=args.maritime_diffuse_passes,
+                heat_capacity_land=args.heat_capacity_land,
+                heat_capacity_ocean=args.heat_capacity_ocean,
+                inertia_shallow=args.inertia_shallow,
+                inertia_deep=args.inertia_deep,
+                mix_depth_m=args.mix_depth_m,
+                lake_inertia=args.lake_inertia,
+                lake_small_area_km2=args.lake_small_area_km2,
+                lake_max_area_km2=args.lake_max_area_km2,
+                freeze_land_C=args.freeze_land_c,
+                freeze_ocean_C=args.freeze_ocean_c,
+                freeze_latent_delta_C=args.freeze_latent_delta_c,
+                latent_ice_m=args.latent_ice_m,
+                ice_albedo_soft_C=args.ice_albedo_soft_c,
+                spinup_years=args.spinup_years,
+                t_init_K=args.t_init_k,
+                aa_blend_px=args.aa_blend_px,
+                currents=bool(args.currents),
+                current_warm_delta_C=args.current_warm_c,
+                current_cold_delta_C=args.current_cold_c,
+                current_peak_lat_deg=args.current_peak_lat,
+                current_lat_sigma_deg=args.current_lat_sigma,
+                current_reach_km=args.current_reach_km,
+            ),
         )
 
     out = args.out_dir
@@ -1062,7 +1231,7 @@ def main() -> None:
             print(
                 f"  wrote {path.name}  "
                 f"T=[{monthly[m].min():.1f}, {monthly[m].max():.1f}] C  "
-                f"mean={monthly[m].mean():.1f}"
+                f"mean={area_weighted_mean_np(monthly[m], lat_g):.1f}"
             )
 
         gray_ann = temperature_to_gray(annual, args.t_gray_min, args.t_gray_max)
@@ -1070,7 +1239,8 @@ def main() -> None:
         save_gray_png(ann_path, gray_ann)
         print(
             f"  wrote {ann_path.name}  "
-            f"T=[{annual.min():.1f}, {annual.max():.1f}] C  mean={annual.mean():.1f}"
+            f"T=[{annual.min():.1f}, {annual.max():.1f}] C  "
+            f"mean={area_weighted_mean_np(annual, lat_g):.1f}"
         )
 
         if args.save_npy:
@@ -1086,14 +1256,14 @@ def main() -> None:
             "min_elev_m": -abs(float(args.max_elev_m)),
             "lapse_K_per_km": args.lapse,
             "greenhouse_factor": args.greenhouse,
-            "heat_transport": args.heat_transport,
             "gray_scale_C": [args.t_gray_min, args.t_gray_max],
             "gray_formula": "gray = clip(round((T_C - T_min)/(T_max - T_min)*255), 0, 255)",
             "months": MONTH_NAMES,
         }
-        with open(out / "temperature_meta.json", "w", encoding="utf-8") as f:
-            json.dump(meta_out, f, indent=2)
-            f.write("\n")
+        write_text_atomic(
+            out / "temperature_meta.json",
+            json.dumps(meta_out, indent=2) + "\n",
+        )
 
     if args.wind:
         from .wind import WindField, elev01_to_meters, synthesize_wind_maps
@@ -1108,9 +1278,10 @@ def main() -> None:
                 elev_m,
                 device=device,
                 wind=WindField(
-                    t_spin_s=24.0 * 3600.0,
-                    planet_radius_km=args.radius_km,
-                    lapse_k_per_km=args.lapse,
+                    **wind_field_kwargs(
+                        planet_radius_km=args.radius_km,
+                        lapse_k_per_km=args.lapse,
+                    )
                 ),
             )
 
@@ -1119,9 +1290,10 @@ def main() -> None:
     release_torch_memory()
 
     meta_out["wall_timing"] = wall.as_meta()
-    with open(out / "temperature_meta.json", "w", encoding="utf-8") as f:
-        json.dump(meta_out, f, indent=2)
-        f.write("\n")
+    write_text_atomic(
+        out / "temperature_meta.json",
+        json.dumps(meta_out, indent=2) + "\n",
+    )
     print(f"Done. Outputs in {out}")
     print(
         f"Annual land/ocean mean: {meta['t_land_mean_C']:.1f} / "

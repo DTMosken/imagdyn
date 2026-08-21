@@ -20,8 +20,8 @@ Usage::
     python -m imagdyn.currents
     python -m imagdyn.currents --dump-maps
 
-Temperature synthesis folds this ΔT into base seawater SST targets
-(see ``synthesize_temperatures``); humidity remains a placeholder.
+Temperature synthesis folds this ΔT into Q_abs as an energy flux each
+month-step (see ``synthesize_temperatures``); humidity remains a placeholder.
 """
 
 from __future__ import annotations
@@ -36,8 +36,10 @@ import numpy as np
 import torch
 from PIL import Image
 
+from .params import CURRENTS, PLANET
 from .temperature import (
-    box_filter_wrap_lon,
+    area_weighted_mean,
+    box_filter_lonlat_metric,
     get_device,
     kernel_radius_px,
     latitude_grid,
@@ -75,14 +77,14 @@ class OceanCurrentFilter:
     def __init__(
         self,
         *,
-        peak_lat_deg: float = 30.0,
-        lat_sigma_deg: float = 12.0,
-        warm_delta_C: float = 4.5,
-        cold_delta_C: float = -4.5,
-        reach_km: float = 450.0,
-        diffuse_passes: int = 5,
-        land_bleed: float = 0.25,
-        planet_radius_km: float = 6371.0,
+        peak_lat_deg: float = CURRENTS.peak_lat_deg,
+        lat_sigma_deg: float = CURRENTS.lat_sigma_deg,
+        warm_delta_C: float = CURRENTS.warm_delta_C,
+        cold_delta_C: float = CURRENTS.cold_delta_C,
+        reach_km: float = CURRENTS.reach_km,
+        diffuse_passes: int = CURRENTS.diffuse_passes,
+        land_bleed: float = CURRENTS.land_bleed,
+        planet_radius_km: float = PLANET.radius_km,
         enabled: bool = True,
     ) -> None:
         self.peak_lat_deg = float(peak_lat_deg)
@@ -157,11 +159,12 @@ class OceanCurrentFilter:
                 meta={"enabled": False, **self._param_meta()},
             )
 
+        lat1 = lat2[:, 0]
         seed = self.signed_coast_source(land_b)
         ry, rx = kernel_radius_px(h, w, self.reach_km, self.planet_radius_km)
         field = seed
         for _ in range(self.diffuse_passes):
-            field = box_filter_wrap_lon(field, ry, rx)
+            field = box_filter_lonlat_metric(field, lat1, ry, rx)
 
         ocean = (~land_b).float()
         land_f = land_b.float()
@@ -184,7 +187,11 @@ class OceanCurrentFilter:
             "west_coast_px": int(west.sum().item()),
             "dT_min_C": float(dT.min().item()),
             "dT_max_C": float(dT.max().item()),
-            "dT_ocean_mean_C": float(dT[ocean.bool()].mean().item()) if bool(ocean.any()) else 0.0,
+            "dT_ocean_mean_C": (
+                float(area_weighted_mean(dT, lat1, mask=ocean.bool()).item())
+                if bool(ocean.any())
+                else 0.0
+            ),
             "humidity": None,
         }
         return CurrentCorrection(temperature_C=dT, humidity=None, meta=meta)
@@ -274,14 +281,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=Path,
         default=root / "graphs" / "temperature",
     )
-    p.add_argument("--peak-lat", type=float, default=30.0)
-    p.add_argument("--lat-sigma", type=float, default=12.0)
-    p.add_argument("--warm-c", type=float, default=3.0)
-    p.add_argument("--cold-c", type=float, default=-3.0)
-    p.add_argument("--reach-km", type=float, default=450.0)
-    p.add_argument("--diffuse-passes", type=int, default=5)
-    p.add_argument("--land-bleed", type=float, default=0.25)
-    p.add_argument("--radius-km", type=float, default=6371.0)
+    p.add_argument("--peak-lat", type=float, default=CURRENTS.peak_lat_deg)
+    p.add_argument("--lat-sigma", type=float, default=CURRENTS.lat_sigma_deg)
+    p.add_argument("--warm-c", type=float, default=CURRENTS.warm_delta_C)
+    p.add_argument("--cold-c", type=float, default=CURRENTS.cold_delta_C)
+    p.add_argument("--reach-km", type=float, default=CURRENTS.reach_km)
+    p.add_argument("--diffuse-passes", type=int, default=CURRENTS.diffuse_passes)
+    p.add_argument("--land-bleed", type=float, default=CURRENTS.land_bleed)
+    p.add_argument("--radius-km", type=float, default=PLANET.radius_km)
     p.add_argument("--dump-maps", action="store_true", help="Write diagnostic PNGs + JSON")
     p.add_argument("--cpu", action="store_true")
     return p.parse_args(argv)

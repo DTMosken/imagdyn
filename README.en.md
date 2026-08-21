@@ -116,7 +116,7 @@ python -m imagdyn pipeline --temperature
 Arguments for the temperature / wind generators go after `--`, for example:
 
 ```bash
-python -m imagdyn temperature -- --cpu --maritime-iters 2 --no-wind
+python -m imagdyn temperature -- --cpu --spinup-years 6 --no-wind
 python -m imagdyn wind -- --annual-only --cpu
 ```
 
@@ -158,6 +158,7 @@ Encoding, layer conventions, and viewer controls are in the technical notes link
 
 | File | Purpose |
 |------|---------|
+| `imagdyn/params.py` | Planet / temperature / currents / wind / encoding **global defaults** (edit here to retune; CLI flags still override) |
 | `.imagdyn_env` | Preferred conda environment name |
 | `.imagdyn_lang` | `zh` / `en` |
 
@@ -171,7 +172,7 @@ Pipeline overview:
 
 ```text
 Full Elevation → ensure / contours
-              → temperature (radiation + land/ocean inertia + current SST)
+              → temperature (heat-capacity energy balance + sea-level diffusion + current flux)
               → wind (pressure belts + thermal pressure → geostrophic/friction balance → terrain)
               → summarize / viewer
 ```
@@ -179,7 +180,7 @@ Full Elevation → ensure / contours
 | Topic | Summary | Details |
 |-------|---------|---------|
 | Data formats | Elevation gray, temperature gray, packed wind RGB, JSON metadata | [docs/data-formats.en.md](docs/data-formats.en.md) |
-| Temperature | Daily-mean TOA insolation, heat-diffusion maritime buffer, small-lake inertia, current SST | [docs/temperature.en.md](docs/temperature.en.md) |
+| Temperature | Daily-mean TOA insolation, heat-capacity spin-up, sea-level diffusion, current flux | [docs/temperature.en.md](docs/temperature.en.md) |
 | Wind / pressure | 36 longitude sectors, cosine belts, Rayleigh AMC subtropical highs, quadratic drag | [docs/wind.en.md](docs/wind.en.md) |
 | Viewer | Local static server, layers and wind arrows, readout pins | [docs/viewer.en.md](docs/viewer.en.md) |
 
@@ -188,7 +189,7 @@ Full Elevation → ensure / contours
 ```text
 IMagDyn/
 ├── IMagDyn.cmd / IMagDyn.sh
-├── imagdyn/                 # Python package (cli / temperature / wind / …)
+├── imagdyn/                 # Python package (cli / params / temperature / wind / …)
 ├── viewer/index.html
 ├── docs/                    # technical notes and screenshots/
 └── graphs/                  # terrain, temperature, wind products

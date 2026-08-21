@@ -9,13 +9,16 @@ import numpy as np
 from PIL import Image
 
 from . import paths
+from .io_gray import write_text_atomic
+from .params import ENCODE, PLANET
+from .temperature import area_weighted_mean_np
 from .timing import StepTimer
 
 ROOT = paths.ROOT
 TEMP_DIR = paths.TEMP_DIR
-T_MIN, T_MAX = -60.0, 45.0
-MAX_ELEV = 8000.0
-MIN_ELEV = -8000.0
+T_MIN, T_MAX = ENCODE.t_gray_min, ENCODE.t_gray_max
+MAX_ELEV = PLANET.max_elev_m
+MIN_ELEV = -PLANET.max_elev_m
 MONTHS = [
     "01 January", "02 February", "03 March", "04 April",
     "05 May", "06 June", "07 July", "08 August",
@@ -41,6 +44,12 @@ def elev_m(g01: np.ndarray, land: np.ndarray) -> np.ndarray:
     out[land] = np.clip((v[land] - 0.5) / 0.5 * MAX_ELEV, 0.0, MAX_ELEV)
     out[~land] = np.clip((0.5 - v[~land]) / 0.5, 0.0, 1.0) * MIN_ELEV
     return out
+
+
+def _wmean(field: np.ndarray, lat: np.ndarray, mask: np.ndarray | None = None) -> float | None:
+    if mask is not None and not np.any(mask):
+        return None
+    return float(area_weighted_mean_np(field, lat, mask=mask))
 
 
 def pct(x: np.ndarray, qs=(5, 10, 25, 50, 75, 90, 95)) -> dict:
@@ -93,15 +102,15 @@ def band_stats(T: np.ndarray, land: np.ndarray, lat: np.ndarray) -> dict:
     }
     for name, m in bands.items():
         out[name] = {
-            "all_mean_C": float(T[m].mean()),
-            "land_mean_C": float(T[m & land].mean()) if (m & land).any() else None,
-            "ocean_mean_C": float(T[m & ~land].mean()) if (m & ~land).any() else None,
+            "all_mean_C": _wmean(T, lat, m),
+            "land_mean_C": _wmean(T, lat, m & land),
+            "ocean_mean_C": _wmean(T, lat, m & ~land),
         }
     out["eq ocean (|lat|<10)"] = {
-        "mean_C": float(T[(np.abs(lat2d) < 10) & (~land)].mean())
+        "mean_C": _wmean(T, lat, (np.abs(lat2d) < 10) & (~land))
     }
     out["polar ocean (|lat|>60)"] = {
-        "mean_C": float(T[(np.abs(lat2d) > 60) & (~land)].mean())
+        "mean_C": _wmean(T, lat, (np.abs(lat2d) > 60) & (~land))
     }
     return out
 
@@ -157,46 +166,78 @@ def main() -> None:
         jumps = np.asarray(jumps)
 
     with wall.step("stats"):
-        freeze = float(meta.get("freeze_C", 0.0))
-        frozen_month = [(monthly[m] <= freeze).mean() * 100 for m in range(12)]
+        freeze_land = float(meta.get("freeze_land_C", 0.0))
+        freeze_ocean = float(meta.get("freeze_ocean_C", meta.get("freeze_C", -1.8)))
+        frozen_month = [
+            100.0
+            * area_weighted_mean_np(
+                (
+                    (land & (monthly[m] <= freeze_land))
+                    | ((~land) & (monthly[m] <= freeze_ocean))
+                ).astype(np.float64),
+                lat,
+            )
+            for m in range(12)
+        ]
 
         stats = {
-            "grid": {"width": w, "height": h, "land_pct": float(land.mean() * 100)},
+            "grid": {
+                "width": w,
+                "height": h,
+                "land_pct": float(100.0 * area_weighted_mean_np(land.astype(np.float64), lat)),
+            },
             "meta_summary": {
                 "device": meta.get("device"),
                 "s0_W_m2": meta.get("s0_W_m2"),
                 "obliquity_deg": meta.get("obliquity_deg"),
                 "greenhouse_factor": meta.get("greenhouse_factor"),
-                "heat_transport": meta.get("heat_transport"),
-                "ocean_sst_nudge": meta.get("ocean_sst_nudge"),
-                "coast_blend_km": meta.get("coast_blend_km"),
+                "heat_capacity_land": meta.get("heat_capacity_land"),
+                "heat_capacity_ocean": meta.get("heat_capacity_ocean"),
+                "spinup_years": meta.get("spinup_years"),
+                "freeze_land_C": meta.get("freeze_land_C"),
+                "freeze_ocean_C": meta.get("freeze_ocean_C"),
                 "gray_scale_C": meta.get("gray_scale_C", [T_MIN, T_MAX]),
             },
             "terrain_display": {
                 "land_elev_m": {
-                    "mean": float(land_elev.mean()),
-                    "max": float(land_elev.max()),
+                    "mean": _wmean(elev, lat, land),
+                    "max": float(land_elev.max()) if land_elev.size else 0.0,
                     **pct(land_elev),
                 },
                 "ocean_depth_m_linear": {
                     "note": f"elev = min_elev_m * (0.5-v)/0.5  (min_elev_m={MIN_ELEV})",
-                    "mean": float(ocean_depth.mean()),
-                    "median": float(np.median(ocean_depth)),
-                    "max": float(ocean_depth.max()),
+                    "mean": _wmean(-elev, lat, ~land) if (~land).any() else 0.0,
+                    "median": float(np.median(ocean_depth)) if ocean_depth.size else 0.0,
+                    "max": float(ocean_depth.max()) if ocean_depth.size else 0.0,
                     **pct(ocean_depth),
                 },
             },
             "temperature_annual_C": {
-                "global": {"mean": float(annual.mean()), "min": float(annual.min()), "max": float(annual.max()), **pct(annual)},
-                "land": {"mean": float(annual[land].mean()), "min": float(annual[land].min()), "max": float(annual[land].max()), **pct(annual[land])},
-                "ocean": {"mean": float(annual[~land].mean()), "min": float(annual[~land].min()), "max": float(annual[~land].max()), **pct(annual[~land])},
+                "global": {
+                    "mean": _wmean(annual, lat),
+                    "min": float(annual.min()),
+                    "max": float(annual.max()),
+                    **pct(annual),
+                },
+                "land": {
+                    "mean": _wmean(annual, lat, land),
+                    "min": float(annual[land].min()) if land.any() else None,
+                    "max": float(annual[land].max()) if land.any() else None,
+                    **(pct(annual[land]) if land.any() else {}),
+                },
+                "ocean": {
+                    "mean": _wmean(annual, lat, ~land),
+                    "min": float(annual[~land].min()) if (~land).any() else None,
+                    "max": float(annual[~land].max()) if (~land).any() else None,
+                    **(pct(annual[~land]) if (~land).any() else {}),
+                },
                 "bands": band_stats(annual, land, lat),
             },
             "temperature_monthly_C": {
                 name: {
-                    "mean": float(monthly[i].mean()),
-                    "land_mean": float(monthly[i][land].mean()),
-                    "ocean_mean": float(monthly[i][~land].mean()),
+                    "mean": _wmean(monthly[i], lat),
+                    "land_mean": _wmean(monthly[i], lat, land),
+                    "ocean_mean": _wmean(monthly[i], lat, ~land),
                     "min": float(monthly[i].min()),
                     "max": float(monthly[i].max()),
                     "frozen_pct": float(frozen_month[i]),
@@ -204,15 +245,19 @@ def main() -> None:
                 for i, name in enumerate(MONTHS)
             },
             "seasonality_Jul_minus_Jan_C": {
-                "land_amp_abs_mean": float(amp[land].mean()),
-                "ocean_amp_abs_mean": float(amp[~land].mean()),
-                "land_amp_p90": float(np.percentile(amp[land], 90)),
-                "ocean_amp_p90": float(np.percentile(amp[~land], 90)),
-                "midlat_land_amp_mean": float(
-                    amp[land & (np.abs(lat[:, None]) >= 30) & (np.abs(lat[:, None]) <= 60)].mean()
+                "land_amp_abs_mean": _wmean(amp, lat, land),
+                "ocean_amp_abs_mean": _wmean(amp, lat, ~land),
+                "land_amp_p90": float(np.percentile(amp[land], 90)) if land.any() else None,
+                "ocean_amp_p90": float(np.percentile(amp[~land], 90)) if (~land).any() else None,
+                "midlat_land_amp_mean": _wmean(
+                    amp,
+                    lat,
+                    land & (np.abs(lat[:, None]) >= 30) & (np.abs(lat[:, None]) <= 60),
                 ),
-                "midlat_ocean_amp_mean": float(
-                    amp[(~land) & (np.abs(lat[:, None]) >= 30) & (np.abs(lat[:, None]) <= 60)].mean()
+                "midlat_ocean_amp_mean": _wmean(
+                    amp,
+                    lat,
+                    (~land) & (np.abs(lat[:, None]) >= 30) & (np.abs(lat[:, None]) <= 60),
                 ),
             },
             "coast_land_minus_ocean_annual_C": {
@@ -226,7 +271,9 @@ def main() -> None:
         }
 
         out = TEMP_DIR / "temperature_stats.json"
-        out.write_text(json.dumps(stats, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        write_text_atomic(
+            out, json.dumps(stats, indent=2, ensure_ascii=False) + "\n"
+        )
 
     # Pretty print
     print("=== IMagDyn climate / terrain stats ===")

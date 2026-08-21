@@ -163,7 +163,11 @@ def ensure_derived_terrain(
         land, above, below = derive_from_full_elevation(elev)
         if force or not land_p.is_file():
             save_mask(land_p, land)
-            print(f"Wrote {land_p.name}  land={100.0 * float(land.mean()):.1f}%")
+            h, _w = land.shape
+            lat = 90.0 - (np.arange(h, dtype=np.float64) + 0.5) * (180.0 / h)
+            wt = np.clip(np.cos(np.deg2rad(lat)), 0.0, 1.0)[:, None]
+            land_pct = float(100.0 * (land.astype(np.float64) * wt).sum() / (wt.sum() * land.shape[1]))
+            print(f"Wrote {land_p.name}  land={land_pct:.1f}%")
         if force or not above_p.is_file():
             save_gray01(above_p, above)
             print(f"Wrote {above_p.name}")

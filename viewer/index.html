@@ -919,6 +919,10 @@
     return stops[stops.length - 1][1];
   }
 
+  /** Fixed display color scales (encode ranges in wind_meta stay for PNG decode). */
+  const DISPLAY_PRESSURE_HPA = [983, 1043];
+  const DISPLAY_SPEED_MS = [0, 60];
+
   const COLOR_STOPS = {
     temperature: [
       [0.0, [8, 16, 48]], [0.22, [30, 80, 160]], [0.38, [70, 180, 200]],
@@ -972,12 +976,45 @@
     return `rgb(${r},${g},${b})`;
   }
 
+  async function ensureWindMetaFull() {
+    if (state.windMetaFull) return state.windMetaFull;
+    try {
+      const res = await fetch(WIND_META_URL, { cache: "no-store" });
+      if (res.ok) state.windMetaFull = await res.json();
+    } catch (_) { /* keep null */ }
+    return state.windMetaFull;
+  }
+
+  /** PNG B-channel encode range for a month (decode only). Display always uses DISPLAY_PRESSURE_HPA. */
+  function pressureEncodeRange(monthIndex) {
+    const wm = state.windMetaFull;
+    const block =
+      typeof monthIndex === "number" && monthIndex >= 0 && Array.isArray(wm?.months) && wm.months[monthIndex]
+        ? wm.months[monthIndex]
+        : wm?.annual;
+    if (block?.gray_scale_pressure_hpa) return block.gray_scale_pressure_hpa;
+    return state.windMeta.gray_scale_pressure_hpa || [980, 1040];
+  }
+
   function getLut(kind) {
-    if (lutCache.has(kind)) return lutCache.get(kind);
+    let cacheKey = kind;
+    let eMin = 980, eMax = 1040;
+    if (kind === "pressure") {
+      [eMin, eMax] = pressureEncodeRange(windMonthIndexForLayer(state.layer));
+      cacheKey = `pressure:${eMin}:${eMax}`;
+    }
+    if (lutCache.has(cacheKey)) return lutCache.get(cacheKey);
     const stops = COLOR_STOPS[kind];
     const lut = new Uint8ClampedArray(256 * 4);
+    const [dMin, dMax] = DISPLAY_PRESSURE_HPA;
+    const dispSpan = Math.max(dMax - dMin, 1e-6);
+    const encSpan = Math.max(eMax - eMin, 1e-6);
     for (let g = 0; g < 256; g++) {
-      const t = g / 255;
+      let t = g / 255;
+      if (kind === "pressure") {
+        const hpa = eMin + t * encSpan;
+        t = (hpa - dMin) / dispSpan;
+      }
       let rgb;
       if (kind === "elev_full") {
         // Hard split: ≤ sea level → light-blue family; >0 → ≥ light green
@@ -990,7 +1027,7 @@
       const i = g * 4;
       lut[i] = r; lut[i + 1] = gv; lut[i + 2] = b; lut[i + 3] = 255;
     }
-    lutCache.set(kind, lut);
+    lutCache.set(cacheKey, lut);
     return lut;
   }
 
@@ -1317,21 +1354,7 @@
     const ih = state.ih;
     const scale = Math.max(state.scale, 1e-6);
     const step = Math.max(1, Math.round(cell / scale));
-    let [sMin, sMax] = state.windMeta.gray_scale_speed || [0, 30];
-    if (!(sMax > sMin) || sMax > 200) {
-      const stride = Math.max(1, Math.floor((iw * ih) / 40000));
-      const vals = [];
-      for (let i = 0; i < uArr.length; i += stride) {
-        const s = Math.hypot(uArr[i], vArr[i]);
-        if (s > 1e-4) vals.push(s);
-      }
-      vals.sort((a, b) => a - b);
-      if (vals.length) {
-        sMin = 0;
-        sMax = Math.max(vals[Math.min(vals.length - 1, Math.floor(vals.length * 0.98))], 1e-3);
-        state.windMeta.gray_scale_speed = [sMin, sMax];
-      } else sMax = 30;
-    }
+    const [sMin, sMax] = DISPLAY_SPEED_MS;
     const span = Math.max(sMax - sMin, 1e-6);
 
     // Visible image range (primary wrap); draw on each horizontal wrap copy
@@ -1617,7 +1640,7 @@
   }
 
   function pressureFromGray(g) {
-    const [pMin, pMax] = state.windMeta.gray_scale_pressure_hpa || [980, 1040];
+    const [pMin, pMax] = pressureEncodeRange(windMonthIndexForLayer(state.layer));
     return pMin + (g / 255) * (pMax - pMin);
   }
 
@@ -1655,7 +1678,7 @@
       };
     }
     if (kind === "pressure") {
-      const [pMin, pMax] = state.windMeta.gray_scale_pressure_hpa || [980, 1040];
+      const [pMin, pMax] = DISPLAY_PRESSURE_HPA;
       return {
         title: t("legendPres"),
         gradient: LEGEND_CSS.pressure,
@@ -1962,11 +1985,11 @@
       <div class="legend-note">${L.note}</div>
     `;
     if (state.showWindArrows && state.hasWindUV) {
-      const [sMin, sMax] = state.windMeta.gray_scale_speed || [0, 30];
+      const [sMin, sMax] = DISPLAY_SPEED_MS;
       html += `
         <div style="font-family:var(--font-data);font-size:0.78rem;margin:0.75rem 0 0.25rem">${t("legendSpeed")}</div>
         <div class="legend-bar" style="background:${LEGEND_CSS.wind_speed}"></div>
-        <div class="legend-labels"><span>${sMin.toFixed(1)}</span><span>${sMax.toFixed(1)}</span></div>
+        <div class="legend-labels"><span>${sMin.toFixed(0)}</span><span>${sMax.toFixed(0)}</span></div>
         <div class="legend-note">${t("legendSpeedNote")}</div>
       `;
     }
@@ -2012,6 +2035,11 @@
     state.layer = layer;
     setStatus(t("loadLayer", { name: layerDisplayName(layer) }));
     els.hoverData.innerHTML = `<div class="empty">${t("loading")}</div>`;
+
+    if (layer.kind === "pressure") {
+      await ensureWindMetaFull();
+      state.windMeta.gray_scale_pressure_hpa = pressureEncodeRange(windMonthIndexForLayer(layer)).slice();
+    }
 
     let usedCache = false;
     if (layer.kind === "temperature" && state.dataReady) {
@@ -2167,14 +2195,12 @@
 
     let url = WIND_UV_ANN_URL;
     let speedScale = state.windMeta.gray_scale_speed || [0, 30];
-    let pressureScale = state.windMeta.gray_scale_pressure_hpa || [980, 1040];
+    let pressureScale = pressureEncodeRange(monthIndex);
     let uRange = [-40, 40];
     let vRange = [-40, 40];
     try {
-      if (!state.windMetaFull) {
-        const resMeta = await fetch(WIND_META_URL, { cache: "no-store" });
-        if (resMeta.ok) state.windMetaFull = await resMeta.json();
-      }
+      await ensureWindMetaFull();
+      pressureScale = pressureEncodeRange(monthIndex);
       const wm = state.windMetaFull;
       const block =
         monthIndex >= 0 && Array.isArray(wm?.months) && wm.months[monthIndex]

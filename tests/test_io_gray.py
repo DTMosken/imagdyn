@@ -6,7 +6,7 @@ from pathlib import Path
 
 import numpy as np
 
-from imagdyn.io_gray import load_gray01, save_gray01, save_mask
+from imagdyn.io_gray import load_gray01, save_gray01, save_gray_png, save_mask, write_text_atomic
 
 
 def test_save_load_gray01_roundtrip(tmp_path: Path) -> None:
@@ -40,3 +40,18 @@ def test_save_mask(tmp_path: Path) -> None:
     assert got[0, 0] == 1.0
     assert got[0, 1] == 0.0
     assert got[1, 1] == 1.0
+
+
+def test_save_gray_png_overwrites(tmp_path: Path) -> None:
+    path = tmp_path / "Temperature - Annual Mean.png"
+    save_gray_png(path, np.zeros((4, 4), dtype=np.uint8))
+    save_gray_png(path, np.full((4, 4), 200, dtype=np.uint8))
+    got = load_gray01(path)
+    np.testing.assert_allclose(got, 200 / 255.0, atol=1 / 255)
+
+
+def test_write_text_atomic_overwrites(tmp_path: Path) -> None:
+    path = tmp_path / "temperature_meta.json"
+    write_text_atomic(path, '{"a": 1}\n')
+    write_text_atomic(path, '{"a": 2}\n')
+    assert path.read_text(encoding="utf-8") == '{"a": 2}\n'

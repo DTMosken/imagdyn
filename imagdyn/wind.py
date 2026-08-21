@@ -33,11 +33,21 @@ import torch.nn.functional as F
 from PIL import Image
 
 from . import paths
+from .io_gray import save_png_atomic, write_text_atomic
+from .params import ENCODE, PLANET, TEMPERATURE, WIND, temperature_call_kwargs, wind_field_kwargs
 from .temperature import (
+    METRIC_COS_EPS,
+    area_weighted_mean,
+    area_weighted_mean_np,
+    area_weights,
+    conv1d_lat_replicate,
+    conv1d_lon_grouped,
     get_device,
     latitude_grid,
     load_grayscale,
+    lon_sigma_px,
     release_torch_memory,
+    smooth_lonlat_metric,
 )
 
 
@@ -63,7 +73,7 @@ def json_safe(obj: Any) -> Any:
 def thermal_to_pressure_anomaly(
     t_anom: torch.Tensor,
     *,
-    k_hpa_per_c: float = 1.1,
+    k_hpa_per_c: float = WIND.k_hpa_per_c,
 ) -> torch.Tensor:
     """Hot → low pressure anomaly (hPa-ish)."""
     return -k_hpa_per_c * t_anom
@@ -72,8 +82,8 @@ def thermal_to_pressure_anomaly(
 def thermal_latitude_weight(
     lat: torch.Tensor,
     *,
-    sigma_deg: float = 18.0,
-    equator_frac: float = 0.2,
+    sigma_deg: float = WIND.thermal_lat_sigma_deg,
+    equator_frac: float = WIND.thermal_equator_frac,
 ) -> torch.Tensor:
     """
     Latitude Gaussian damper for local thermal → pressure.
@@ -91,7 +101,7 @@ def temperature_to_sea_level(
     temperature_C: torch.Tensor,
     elev_asl_m: torch.Tensor,
     *,
-    lapse_k_per_km: float = 6.5,
+    lapse_k_per_km: float = PLANET.lapse_k_per_km,
 ) -> torch.Tensor:
     """
     Undo elevation lapse so thermal → pressure maps to sea-level pressure (SLP).
@@ -121,7 +131,7 @@ def planet_radius_km_from_grid(
     """
     if planet_radius_km is not None and planet_radius_km > 0:
         return float(planet_radius_km)
-    return 6371.0
+    return PLANET.radius_km
 
 
 def km_per_px(height: int, width: int, radius_km: float) -> tuple[float, float]:
@@ -168,6 +178,28 @@ def _gauss_kernels_2d(
     return g, dg
 
 
+def _gauss_and_deriv_rows(
+    sigma_row: torch.Tensor,
+    r: int,
+    *,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Per-row 1D Gaussian and derivative kernels, shape (H, K)."""
+    x = torch.arange(-r, r + 1, device=device, dtype=dtype)
+    sig = sigma_row.clamp(min=0.35)[:, None]
+    g = torch.exp(-0.5 * (x[None, :] / sig) ** 2)
+    g = g / g.sum(dim=1, keepdim=True).clamp_min(1e-12)
+    dg = (-x[None, :] / (sig * sig)) * g
+    mom = (x[None, :] * dg).sum(dim=1, keepdim=True)
+    fallback = torch.zeros_like(dg)
+    if r >= 1:
+        fallback[:, r - 1] = -0.5
+        fallback[:, r + 1] = 0.5
+    dg = torch.where(mom.abs() < 1e-12, fallback, dg / mom)
+    return g, dg
+
+
 def conv_grad_lonlat(
     field: torch.Tensor,
     *,
@@ -177,21 +209,31 @@ def conv_grad_lonlat(
     sigma_px: float = 1.25,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
-    Neighborhood-aware (∂/∂x_east, ∂/∂y_south) via Gaussian-derivative convolution.
+    Neighborhood-aware (∂/∂x_east, ∂/∂y_south) via separable Gaussian derivatives.
 
+    EW kernel width is ``σ_eq / max(cos φ, ε)``; NS uses ``σ_eq``.
+    After the pixel derivative, east–west distance is ``dx_eq * cos(φ)``.
     Lon wraps; lat replicates. Polar rows: NS gradient forced to 0.
     """
-    g, dg = _gauss_kernels_2d(sigma_px, device=field.device, dtype=field.dtype)
-    # ∂/∂x: g(y) ⊗ dg(x);  ∂/∂y_row (south): dg(y) ⊗ g(x)
-    kx = torch.outer(g, dg)  # (ky, kx)
-    ky = torch.outer(dg, g)
-    r = g.numel() // 2
-    padded = _pad_lonlat(field, r, r)
-    f = padded[None, None]
-    dfdx_px = F.conv2d(f, kx[None, None])[0, 0]
-    dfdy_px = F.conv2d(f, ky[None, None])[0, 0]
+    h, w = field.shape
+    lat1 = lat_deg.reshape(-1)[:h].to(device=field.device, dtype=field.dtype)
+    sig_eq = max(float(sigma_px), 0.35)
 
-    cos_lat = torch.cos(torch.deg2rad(lat_deg)).clamp(0.05, 1.0)[:, None]
+    g_ns, dg_ns = _gauss_kernels_2d(sig_eq, device=field.device, dtype=field.dtype)
+    sig_row = lon_sigma_px(lat1, sig_eq, eps=METRIC_COS_EPS)
+    r_ew = max(1, min(max(1, w // 6), max(1, int(math.ceil(3.0 * float(sig_row.max().item()))))))
+    g_ew, dg_ew = _gauss_and_deriv_rows(
+        sig_row, r_ew, device=field.device, dtype=field.dtype
+    )
+
+    dfdx_px = conv1d_lat_replicate(
+        conv1d_lon_grouped(field, dg_ew[:, None, :]), g_ns
+    )
+    dfdy_px = conv1d_lon_grouped(
+        conv1d_lat_replicate(field, dg_ns), g_ew[:, None, :]
+    )
+
+    cos_lat = torch.cos(torch.deg2rad(lat1)).clamp(0.05, 1.0)[:, None]
     dx = dx_eq_km * cos_lat
     dfdx = dfdx_px / dx
     dfdy = dfdy_px / dy_km
@@ -228,39 +270,30 @@ def smooth_wind_uv(
     v: torch.Tensor,
     *,
     sigma_px: float = 2.0,
+    lat_deg: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Gaussian-convolve wind components (vector average → neighborhood direction).
 
-    Lon wraps; lat replicates. Speed is not renormalized — magnitude softens slightly.
+    EW blur radius grows as ``1/cos(φ)``. Lon wraps; lat replicates.
+    Speed is not renormalized — magnitude softens slightly.
     """
     if sigma_px <= 0:
         return u, v
-    return smooth_field_lonlat(u, sigma_px=sigma_px), smooth_field_lonlat(v, sigma_px=sigma_px)
+    return (
+        smooth_field_lonlat(u, sigma_px=sigma_px, lat_deg=lat_deg),
+        smooth_field_lonlat(v, sigma_px=sigma_px, lat_deg=lat_deg),
+    )
 
 
 def smooth_field_lonlat(
     field: torch.Tensor,
     *,
     sigma_px: float,
+    lat_deg: torch.Tensor,
 ) -> torch.Tensor:
-    """Mild 2D Gaussian diffusion: longitude wraps, latitude replicates (no pole wrap)."""
-    if sigma_px <= 0:
-        return field
-    h, w = field.shape[-2], field.shape[-1]
-    # Keep kernel inside the padded field (tiny test grids / narrow strips).
-    max_r = max(1, min(h, w) // 2)
-    sig = min(float(sigma_px), max_r / 3.0)
-    g, _dg = _gauss_kernels_2d(sig, device=field.device, dtype=field.dtype)
-    k = torch.outer(g, g)[None, None]
-    r = g.numel() // 2
-    r = min(r, max_r)
-    if r < g.numel() // 2:
-        # Rebuild a smaller kernel that fits
-        g, _dg = _gauss_kernels_2d(max(r / 3.0, 0.35), device=field.device, dtype=field.dtype)
-        k = torch.outer(g, g)[None, None]
-        r = g.numel() // 2
-    return F.conv2d(_pad_lonlat(field, r, r)[None, None], k)[0, 0]
+    """Metric Gaussian diffusion: NS ``σ_eq``, EW ``σ_eq / cos(φ)``; lon wrap, lat replicate."""
+    return smooth_lonlat_metric(field, lat_deg, sigma_px)
 
 
 def diffuse_pressure_2d(
@@ -268,8 +301,8 @@ def diffuse_pressure_2d(
     lat_deg: torch.Tensor,
     *,
     sigma_px: float = 4.0,
-    polar_cut_lat: float = 88.0,
-    polar_fade_lat: float = 85.0,
+    polar_cut_lat: float = 89.0,
+    polar_fade_lat: float = 87.0,
 ) -> torch.Tensor:
     """
     Mild spatial diffusion of the total pressure field.
@@ -278,11 +311,11 @@ def diffuse_pressure_2d(
     - Lat uses replicate pad (poles do not wrap to each other).
     - Between ``polar_fade_lat`` and ``polar_cut_lat``, E–W anomalies are
       linearly damped toward the zonal mean (fully zonal at/above the cut)
-      so the 88° ring has no hard pressure jump.
+      so the 89° ring has no hard pressure jump.
     """
     if sigma_px <= 0:
         return pressure
-    out = smooth_field_lonlat(pressure, sigma_px=sigma_px)
+    out = smooth_field_lonlat(pressure, sigma_px=sigma_px, lat_deg=lat_deg)
     abs_lat = lat_deg.abs()
     span = max(float(polar_cut_lat - polar_fade_lat), 1e-3)
     # 0 equatorward of fade → 1 at/above cut
@@ -292,15 +325,8 @@ def diffuse_pressure_2d(
     return out
 
 
-def area_weights(lat_deg: torch.Tensor, width: int) -> torch.Tensor:
-    w = torch.cos(torch.deg2rad(lat_deg)).clamp(0.0, 1.0)[:, None].expand(-1, width)
-    return w
-
-
 def enforce_area_mean_zero(field: torch.Tensor, lat_deg: torch.Tensor) -> torch.Tensor:
-    h, w = field.shape
-    wt = area_weights(lat_deg, w)
-    mean = (field * wt).sum() / wt.sum().clamp_min(1e-6)
+    mean = area_weighted_mean(field, lat_deg)
     return field - mean
 
 
@@ -346,7 +372,7 @@ def land_belt_block_scale(
     belt_anom: torch.Tensor,
     land_s: torch.Tensor,
     *,
-    land_belt_frac: float = 0.2,
+    land_belt_frac: float = 0.1,
     block_half_hpa: float = 1.5,
 ) -> torch.Tensor:
     """
@@ -802,12 +828,13 @@ def belt_placement_from_T1d(
     """
     teq_i = int(torch.argmax(T1d).item())
     teq_lat = float(lat[teq_i].item())
-    T_ref = float(T1d.mean().item())
+    T_ref = float(area_weighted_mean(T1d, lat).item())
     k_belt = float(k_hpa_per_c) * float(belt_k_frac)
     a = float(np.clip(k_belt * (float(T1d[teq_i].item()) - T_ref), 0.8, belt_amp_max_hpa))
     h = int(T1d.shape[0])
-    t_n = float(T1d[: max(1, h // 20)].mean().item())
-    t_s = float(T1d[-max(1, h // 20) :].mean().item())
+    ncap = max(1, h // 20)
+    t_n = float(area_weighted_mean(T1d[:ncap], lat[:ncap]).item())
+    t_s = float(area_weighted_mean(T1d[-ncap:], lat[-ncap:]).item())
     b_n = float(np.clip(k_belt * (T_ref - t_n), 0.8, belt_amp_max_hpa))
     b_s = float(np.clip(k_belt * (T_ref - t_s), 0.8, belt_amp_max_hpa))
     c_n = float(secondary_frac) * (a + b_n)
@@ -833,7 +860,7 @@ def belt_placement_from_T1d(
     spl_s = find_subpolar_low_from_temp_gradient(
         lat, T1d, sth_s, toward_pole_sign=-1.0
     )
-    pol_n, pol_s = 88.0, -88.0
+    pol_n, pol_s = 89.0, -89.0
     anom = build_belt_anomaly_1d(
         lat,
         teq_lat=teq_lat,
@@ -1001,58 +1028,58 @@ class WindField:
     def __init__(
         self,
         *,
-        p0_hpa: float = 1013.25,
-        k_hpa_per_c: float = 1.1,
+        p0_hpa: float = WIND.p0_hpa,
+        k_hpa_per_c: float = WIND.k_hpa_per_c,
         # Planetary belt amplitudes stay modest so local thermal p can show.
-        belt_k_frac: float = 0.22,
-        belt_amp_max_hpa: float = 7.0,
-        secondary_frac: float = 0.35,
+        belt_k_frac: float = WIND.belt_k_frac,
+        belt_amp_max_hpa: float = WIND.belt_amp_max_hpa,
+        secondary_frac: float = WIND.secondary_frac,
         # Light latitude smooth after cosine belt segments (no Gaussian σ).
-        belt_blend_deg: float = 1.5,
+        belt_blend_deg: float = WIND.belt_blend_deg,
         # Rayleigh-drag AMC path integral → subtropical high (no α, no fixed 40 m/s).
-        drag_kappa0: float = 1.4e-6,
-        drag_kappa_lat: float = 3.0,
-        hadley_v_m_s: float = 2.8,
-        tropopause_h_m: float = 10_000.0,
-        thermal_wind_scale: float = 6500.0,
-        u_crit_min_m_s: float = 20.0,
-        u_crit_max_m_s: float = 70.0,
-        amc_max_lat_abs: float = 50.0,
-        belt_lon_sectors: int = 36,
-        t_spin_s: float = 24.0 * 3600.0,
-        planet_radius_km: float = 6371.0,
-        drag: float = 1.2e-5,
+        drag_kappa0: float = WIND.drag_kappa0,
+        drag_kappa_lat: float = WIND.drag_kappa_lat,
+        hadley_v_m_s: float = WIND.hadley_v_m_s,
+        tropopause_h_m: float = WIND.tropopause_h_m,
+        thermal_wind_scale: float = WIND.thermal_wind_scale,
+        u_crit_min_m_s: float = WIND.u_crit_min_m_s,
+        u_crit_max_m_s: float = WIND.u_crit_max_m_s,
+        amc_max_lat_abs: float = WIND.amc_max_lat_abs,
+        belt_lon_sectors: int = WIND.belt_lon_sectors,
+        t_spin_s: float = PLANET.t_spin_hours * 3600.0,
+        planet_radius_km: float = PLANET.radius_km,
+        drag: float = WIND.drag,
         # Quadratic surface drag coeff c_d (1/m): F_drag = −c_d |V| V.
         # Defaults ≈ old linear μ / 10 m/s so mid-lat speeds stay similar.
-        friction_ocean: float = 3.0e-6,
-        friction_land: float = 1.0e-5,
-        air_density: float = 1.2,
-        speed_cap: float = 60.0,
+        friction_ocean: float = WIND.friction_ocean,
+        friction_land: float = WIND.friction_land,
+        air_density: float = WIND.air_density,
+        speed_cap: float = WIND.speed_cap,
         # Terrain: ∇h in m/km — require real slopes; mild speed tweaks only.
-        upslope_slow: float = 0.70,
+        upslope_slow: float = WIND.upslope_slow,
         # Lee accelerates downslopes.
-        downslope_boost: float = 0.15,
-        block_speed: float = 3.0,
-        divert_frac: float = 0.28,
-        slope_block_m_per_km: float = 35.0,
-        force_scale: float = 1.0,
-        polar_ocean_lat: float = 88.0,
-        polar_fade_lat: float = 85.0,
-        coast_sigma_px: float = 6.0,
+        downslope_boost: float = WIND.downslope_boost,
+        block_speed: float = WIND.block_speed,
+        divert_frac: float = WIND.divert_frac,
+        slope_block_m_per_km: float = WIND.slope_block_m_per_km,
+        force_scale: float = WIND.force_scale,
+        polar_ocean_lat: float = WIND.polar_ocean_lat,
+        polar_fade_lat: float = WIND.polar_fade_lat,
+        coast_sigma_px: float = WIND.coast_sigma_px,
         # Match temperature.py default: undo land lapse before SLP pressure
-        lapse_k_per_km: float = 6.5,
+        lapse_k_per_km: float = PLANET.lapse_k_per_km,
         # Convolution widths (px) for ∇p and neighborhood wind direction
-        grad_sigma_px: float = 3.0,
-        wind_smooth_sigma_px: float = 1.0,
+        grad_sigma_px: float = WIND.grad_sigma_px,
+        wind_smooth_sigma_px: float = WIND.wind_smooth_sigma_px,
         # Land keeps this fraction of belt anomaly at full (high-pressure) block.
-        land_belt_frac: float = 0.2,
+        land_belt_frac: float = WIND.land_belt_frac,
         # Sigmoid half-width (hPa): gate = σ(belt_anom / block_half_hpa).
-        land_block_half_hpa: float = 1.5,
+        land_block_half_hpa: float = WIND.land_block_half_hpa,
         # Local thermal→p weaker near equator (Gaussian notch).
-        thermal_lat_sigma_deg: float = 18.0,
-        thermal_equator_frac: float = 0.01,
+        thermal_lat_sigma_deg: float = WIND.thermal_lat_sigma_deg,
+        thermal_equator_frac: float = WIND.thermal_equator_frac,
         # Mild 2D diffusion of total SLP after belts + thermal.
-        pressure_smooth_sigma_px: float = 8.0,
+        pressure_smooth_sigma_px: float = WIND.pressure_smooth_sigma_px,
     ) -> None:
         self.p0_hpa = float(p0_hpa)
         self.k_hpa_per_c = float(k_hpa_per_c)
@@ -1305,7 +1332,7 @@ class WindField:
         v = v * tscale
 
         # Neighborhood wind direction: convolve UV (vector average of nearby cells)
-        u, v = smooth_wind_uv(u, v, sigma_px=self.wind_smooth_sigma_px)
+        u, v = smooth_wind_uv(u, v, sigma_px=self.wind_smooth_sigma_px, lat_deg=lat)
 
         # Image frame: +V south (row direction). Flip V after physics.
         v = -v
@@ -1349,14 +1376,14 @@ class WindField:
                 "note": (
                     f"{int(belt_mean['n_sectors'])} lon sectors: each cosine "
                     "build_belt_anomaly_1d from sector-mean T (Rayleigh-drag AMC + "
-                    "thermal-wind u_crit; subpolar max|dT/dφ|; polar ±88°); "
+                    "thermal-wind u_crit; subpolar max|dT/dφ|; polar ±89°); "
                     "periodic lon interpolate; meta = mean latitudes"
                 ),
                 "subtropical_high": (
                     "mean of sector AMC path integrals (Rayleigh drag + thermal-wind u_crit)"
                 ),
                 "subpolar_low": "mean of sector max |dT_bar/dphi| poleward of subtropical high",
-                "polar_high": "fixed ±88°",
+                "polar_high": "fixed ±89°",
             },
             "upper_amc": amc_meta,            "amplitudes_hpa": {
                 "note": "design = mean sample peaks; equator/subtropical/… = zonal-mean total SLP at observed centers",
@@ -1404,10 +1431,10 @@ class WindField:
                 "physics": "+X east, +Y north",
                 "stored_uv": "+U east, +V south (image row direction)",
             },
-            "pressure_mean_hpa": float(p.mean().item()),
-            "speed_mean": float(speed.mean().item()),
+            "pressure_mean_hpa": float(area_weighted_mean(p, lat).item()),
+            "speed_mean": float(area_weighted_mean(speed, lat).item()),
             "speed_max": float(speed.max().item()),
-            "terrain_dot_mean": float(terrain_dot.mean().item()),
+            "terrain_dot_mean": float(area_weighted_mean(terrain_dot, lat).item()),
             "pressure_kind": "sea_level (from sea-levelized temperature)",
             "lapse_k_per_km": self.lapse_k_per_km,
             "grad_sigma_px": self.grad_sigma_px,
@@ -1443,39 +1470,11 @@ def value_to_gray(v: np.ndarray, vmin: float, vmax: float) -> np.ndarray:
 def save_gray_png(path: Path, gray: np.ndarray) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    _save_png_atomic(path, Image.fromarray(gray, mode="L"))
+    save_png_atomic(path, Image.fromarray(gray, mode="L"))
 
 
 def _save_png_atomic(path: Path, img: Image.Image, *, attempts: int = 8) -> None:
-    """
-    Write via a same-dir temp file then ``os.replace``.
-
-    Windows often raises OSError Errno 22 when overwriting a PNG that the
-    viewer (or antivirus) still has open; retry + replace is more reliable
-    than ``Image.save`` straight to the final path.
-    """
-    import os
-    import time
-
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f".{path.stem}.{os.getpid()}.tmp{path.suffix}")
-    last_err: OSError | None = None
-    for i in range(max(attempts, 1)):
-        try:
-            img.save(tmp, format="PNG", compress_level=1)
-            os.replace(tmp, path)
-            return
-        except OSError as e:
-            last_err = e
-            try:
-                if tmp.is_file():
-                    tmp.unlink()
-            except OSError:
-                pass
-            time.sleep(0.05 * (i + 1))
-    assert last_err is not None
-    raise last_err
+    save_png_atomic(path, img, attempts=attempts)
 
 
 def _finite_range(arr: np.ndarray, lo_pct: float, hi_pct: float) -> tuple[float, float]:
@@ -1606,7 +1605,9 @@ def read_scalar_rgb16_png(path: Path, value_range: list[float] | tuple[float, fl
     return decode_u16_pair(img[..., 0], img[..., 1], float(value_range[0]), float(value_range[1]))
 
 
-def elev01_to_meters(elev01: np.ndarray, land: np.ndarray, max_elev_m: float = 8000.0) -> np.ndarray:
+def elev01_to_meters(
+    elev01: np.ndarray, land: np.ndarray, max_elev_m: float = PLANET.max_elev_m
+) -> np.ndarray:
     out = np.zeros_like(elev01, dtype=np.float32)
     out[land] = np.clip((elev01[land] - 0.5) / 0.5 * max_elev_m, 0.0, max_elev_m)
     out[~land] = np.clip((0.5 - elev01[~land]) / 0.5, 0.0, 1.0) * (-max_elev_m)
@@ -1617,9 +1618,9 @@ def prepare_surface_for_wind(
     land: np.ndarray,
     elev_m: np.ndarray,
     *,
-    polar_ocean_lat: float = 88.0,
-    polar_fade_lat: float = 85.0,
-    coast_sigma_px: float = 6.0,
+    polar_ocean_lat: float = WIND.polar_ocean_lat,
+    polar_fade_lat: float = WIND.polar_fade_lat,
+    coast_sigma_px: float = WIND.coast_sigma_px,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """
     Polar + coast prep for the wind engine.
@@ -1656,20 +1657,32 @@ def prepare_surface_for_wind(
     land_h = np.where(land_out, np.maximum(elev_out, 0.0), 0.0).astype(np.float32)
     soft = land_out.astype(np.float32)
     sig = max(float(coast_sigma_px), 0.5)
-    soft = gaussian_filter1d(soft, sigma=sig, axis=1, mode="wrap")
+    cos = np.clip(np.abs(np.cos(np.deg2rad(lat))), 0.015, 1.0)
+    sig_lon = sig / cos
+    for i in range(h):
+        soft[i] = gaussian_filter1d(soft[i], sigma=float(sig_lon[i]), mode="wrap")
     soft = gaussian_filter1d(soft, sigma=sig * 0.6, axis=0, mode="nearest")
     soft = np.clip(soft, 0.0, 1.0).astype(np.float32)
     elev_terrain = (soft * land_h).astype(np.float32)
     return land_out, elev_out, elev_terrain, soft
 
 
-def _percentile_stats(arr: np.ndarray) -> dict[str, float]:
-    a = np.asarray(arr, dtype=np.float64)
-    a = a[np.isfinite(a)]
+def _percentile_stats(
+    arr: np.ndarray, weights: np.ndarray | None = None
+) -> dict[str, float]:
+    a = np.asarray(arr, dtype=np.float64).reshape(-1)
+    finite = np.isfinite(a)
+    a = a[finite]
     if a.size == 0:
         return {"mean": 0.0, "min": 0.0, "max": 0.0, "p5": 0.0, "p50": 0.0, "p95": 0.0}
+    if weights is None:
+        mean = float(a.mean())
+    else:
+        w = np.asarray(weights, dtype=np.float64).reshape(-1)[finite]
+        sw = float(w.sum())
+        mean = float((a * w).sum() / sw) if sw > 0.0 else 0.0
     return {
-        "mean": float(a.mean()),
+        "mean": mean,
         "min": float(a.min()),
         "max": float(a.max()),
         "p5": float(np.percentile(a, 5)),
@@ -1695,15 +1708,18 @@ def synthesize_aquaplanet_temperatures(
     *,
     device: torch.device,
     sample_width: int = 64,
-    obliquity_deg: float = 23.5,
-    s0: float = 1361.0,
-    greenhouse_factor: float = 1.46,
-    heat_transport: float = 0.58,
-    planet_radius_km: float = 6371.0,
+    obliquity_deg: float = PLANET.obliquity_deg,
+    s0: float = PLANET.s0,
+    greenhouse_factor: float = TEMPERATURE.greenhouse_factor,
+    planet_radius_km: float = PLANET.radius_km,
+    spinup_years: int = 2,
 ) -> tuple[np.ndarray, dict[str, Any]]:
     """
     Same temperature pipeline as the full map, on an aquaplanet strip:
     all ocean, elev01 = 0.5 (0 m ASL). Currents off (no coasts).
+
+    ``spinup_years`` defaults to 2 so wind-stats debug stays cheap; the
+    mapped ``temperature`` CLI uses ``TEMPERATURE.spinup_years``.
 
     Returns monthly (12,H,W) °C and synthesize meta.
     """
@@ -1716,32 +1732,14 @@ def synthesize_aquaplanet_temperatures(
         elev01,
         land,
         device=device,
-        s0=float(s0),
-        obliquity_deg=float(obliquity_deg),
-        max_elev_m=8000.0,
-        lapse_k_per_km=6.5,
-        planet_radius_km=float(planet_radius_km),
-        neighbor_radius_km=400.0,
-        maritime_e_fold_km=250.0,
-        greenhouse_factor=float(greenhouse_factor),
-        heat_transport=float(heat_transport),
-        albedo_ocean=0.11,
-        albedo_land=0.18,
-        albedo_ice=0.45,
-        ice_threshold_C=-2.0,
-        freeze_C=0.0,
-        freeze_soft_C=1.5,
-        ocean_inertia=0.90,
-        land_inertia=0.28,
-        continentality_amp=1.2,
-        coast_blend_km=150.0,
-        ocean_mix_km=450.0,
-        coast_land_pull=0.50,
-        coast_ocean_pull=0.45,
-        ocean_sst_nudge=0.55,
-        maritime_iters=2,
-        maritime_diffuse_passes=6,
-        currents=False,
+        **temperature_call_kwargs(
+            s0=float(s0),
+            obliquity_deg=float(obliquity_deg),
+            greenhouse_factor=float(greenhouse_factor),
+            planet_radius_km=float(planet_radius_km),
+            currents=False,
+            spinup_years=int(spinup_years),
+        ),
     )
     return monthly, meta
 
@@ -1807,11 +1805,10 @@ def waterworld_1d_profile(
     height: int,
     sample_width: int = 64,
     lat_step_deg: float = 1.0,
-    obliquity_deg: float = 23.5,
-    s0: float = 1361.0,
-    greenhouse_factor: float = 1.46,
-    heat_transport: float = 0.58,
-    planet_radius_km: float = 6371.0,
+    obliquity_deg: float = PLANET.obliquity_deg,
+    s0: float = PLANET.s0,
+    greenhouse_factor: float = TEMPERATURE.greenhouse_factor,
+    planet_radius_km: float = PLANET.radius_km,
 ) -> dict[str, Any]:
     """
     Aquaplanet debug of the full wind pipeline: all ocean, elev = 0 m.
@@ -1832,7 +1829,6 @@ def waterworld_1d_profile(
         obliquity_deg=obl,
         s0=s0,
         greenhouse_factor=greenhouse_factor,
-        heat_transport=heat_transport,
         planet_radius_km=planet_radius_km,
     )
     decls = np.asarray(t_meta.get("declination_deg"), dtype=np.float64)
@@ -1866,7 +1862,6 @@ def waterworld_1d_profile(
         "obliquity_deg": obl,
         "s0_W_m2": float(s0),
         "greenhouse_factor": float(greenhouse_factor),
-        "heat_transport": float(heat_transport),
         "lat_step_deg": float(lat_step_deg),
         "sample_width": tw,
         "temperature_meta": {
@@ -1875,8 +1870,8 @@ def waterworld_1d_profile(
                 "declination_deg",
                 "t_annual_mean_C",
                 "t_ocean_mean_C",
-                "ocean_sst_nudge",
-                "maritime_iters",
+                "spinup_years",
+                "heat_capacity_ocean",
             )
             if k in t_meta
         },
@@ -1903,19 +1898,26 @@ def build_wind_stats(
         land_b = np.zeros(p.shape, dtype=bool)
     ocean = ~land_b
     h, w = p.shape
+    lat = 90.0 - (np.arange(h, dtype=np.float64) + 0.5) * (180.0 / h)
+    wt = np.clip(np.cos(np.deg2rad(lat)), 0.0, 1.0)[:, None]
+    wt2 = np.broadcast_to(wt, p.shape)
     return {
-        "grid": {"height": h, "width": w, "land_pct": float(100.0 * land_b.mean())},
+        "grid": {
+            "height": h,
+            "width": w,
+            "land_pct": float(100.0 * area_weighted_mean_np(land_b.astype(np.float64), lat)),
+        },
         "pressure_hpa": {
-            "global": _percentile_stats(p),
-            "land": _percentile_stats(p[land_b]) if land_b.any() else {},
-            "ocean": _percentile_stats(p[ocean]) if ocean.any() else {},
+            "global": _percentile_stats(p, wt2),
+            "land": _percentile_stats(p[land_b], wt2[land_b]) if land_b.any() else {},
+            "ocean": _percentile_stats(p[ocean], wt2[ocean]) if ocean.any() else {},
         },
         "speed_m_s": {
-            "global": _percentile_stats(spd),
-            "land": _percentile_stats(spd[land_b]) if land_b.any() else {},
-            "ocean": _percentile_stats(spd[ocean]) if ocean.any() else {},
+            "global": _percentile_stats(spd, wt2),
+            "land": _percentile_stats(spd[land_b], wt2[land_b]) if land_b.any() else {},
+            "ocean": _percentile_stats(spd[ocean], wt2[ocean]) if ocean.any() else {},
         },
-        "terrain_dot": _percentile_stats(dot),
+        "terrain_dot": _percentile_stats(dot, wt2),
         "meta_snapshot": {
             k: result.meta[k]
             for k in (
@@ -1940,7 +1942,9 @@ def write_wind_stats(stats: dict[str, Any], out_dir: Path | None = None) -> Path
     out_dir = out_dir or paths.WIND_DIR
     out_dir.mkdir(parents=True, exist_ok=True)
     path = out_dir / paths.WIND_STATS
-    path.write_text(json.dumps(json_safe(stats), indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    write_text_atomic(
+        path, json.dumps(json_safe(stats), indent=2, ensure_ascii=False) + "\n"
+    )
     return path
 
 
@@ -2145,7 +2149,7 @@ def synthesize_wind_maps(
             "pressure": "packed in Wind-UV B channel; gray_scale_pressure_hpa",
             "speed": "packed in Terrain-Dot B channel; also derived from UV in viewer",
             "stats": paths.WIND_STATS,
-            "polar": "E–W pressure anomaly damped 85→88° to zonal mean; |lat|≥88 forced ocean + elev→0",
+            "polar": "E–W pressure anomaly damped 87→89° to zonal mean; |lat|≥89 forced ocean + elev→0",
             "slp": "temperature sea-levelized (undo land lapse) before pressure anomalies; products are SLP",
             "convolution": "∇p and wind UV use Gaussian convolution (neighborhood direction)",
         },
@@ -2157,7 +2161,7 @@ def synthesize_wind_maps(
         },
     }
     meta_path = out_dir / paths.WIND_META
-    meta_path.write_text(json.dumps(json_safe(meta), indent=2) + "\n", encoding="utf-8")
+    write_text_atomic(meta_path, json.dumps(json_safe(meta), indent=2) + "\n")
     print(f"  wrote {meta_path}")
     return meta
 
@@ -2169,10 +2173,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--out-dir", type=Path, default=paths.WIND_DIR)
     p.add_argument("--elevation", type=Path, default=root / "graphs" / paths.FULL_ELEV)
     p.add_argument("--land-mask", type=Path, default=root / "graphs" / paths.LAND_MASK)
-    p.add_argument("--max-elev-m", type=float, default=8000.0)
-    p.add_argument("--lapse", type=float, default=6.5, help="K/km; undo land lapse for SLP")
-    p.add_argument("--t-spin-hours", type=float, default=24.0)
-    p.add_argument("--radius-km", type=float, default=6371.0)
+    p.add_argument("--max-elev-m", type=float, default=PLANET.max_elev_m)
+    p.add_argument("--lapse", type=float, default=PLANET.lapse_k_per_km, help="K/km; undo land lapse for SLP")
+    p.add_argument("--t-spin-hours", type=float, default=PLANET.t_spin_hours)
+    p.add_argument("--radius-km", type=float, default=PLANET.radius_km)
     p.add_argument("--cpu", action="store_true")
     p.add_argument("--annual-only", action="store_true")
     return p.parse_args(argv)
@@ -2191,7 +2195,7 @@ def main(argv: list[str] | None = None) -> int:
 
     with wall.step("load"):
         meta_path = args.temp_dir / paths.TEMP_META
-        t_min, t_max = -60.0, 45.0
+        t_min, t_max = ENCODE.t_gray_min, ENCODE.t_gray_max
         if meta_path.is_file():
             tm = json.loads(meta_path.read_text(encoding="utf-8"))
             gs = tm.get("gray_scale_C")
@@ -2227,9 +2231,11 @@ def main(argv: list[str] | None = None) -> int:
         elev_m = elev01_to_meters(elev01, land, max_elev_m=args.max_elev_m)
 
     wind = WindField(
-        t_spin_s=args.t_spin_hours * 3600.0,
-        planet_radius_km=args.radius_km,
-        lapse_k_per_km=args.lapse,
+        **wind_field_kwargs(
+            t_spin_s=args.t_spin_hours * 3600.0,
+            planet_radius_km=args.radius_km,
+            lapse_k_per_km=args.lapse,
+        )
     )
     with wall.step("synthesize"):
         synthesize_wind_maps(

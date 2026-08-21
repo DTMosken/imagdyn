@@ -10,7 +10,7 @@ Single-channel grayscale; **0.5** (about gray 128) = sea level:
 
 | Range | Meaning |
 |-------|---------|
-| `> 0.5` | Land → linear map to `0 … max_elev_m` (default **+8000 m**) |
+| `> 0.5` | Land → linear map to `0 … max_elev_m` (default **+8000 m**, see [`imagdyn/params.py`](../imagdyn/params.py)) |
 | `< 0.5` | Ocean → linear map to `0 … min_elev_m` (default **−8000 m**) |
 
 Land/ocean prefers `Terrain - Land Mask.png` (white = land). Without a mask, `ensure` / the viewer infer land from elevation `> 0.5`.
@@ -29,7 +29,7 @@ Example seed: `graphs/template/` (real-Earth full elevation). Menu item `2 ensur
 gray = clip((T_C − T_MIN) / (T_MAX − T_MIN) × 255)
 ```
 
-Defaults: `T_MIN = −60 °C`, `T_MAX = +45 °C`. Same directory:
+Defaults: `T_MIN = −60 °C`, `T_MAX = +45 °C` (`ENCODE` in [`imagdyn/params.py`](../imagdyn/params.py)). Same directory:
 
 - `temperature_meta.json` — generation parameters and summary
 - `temperature_stats.json` — zonal / land–ocean stats from `summarize`

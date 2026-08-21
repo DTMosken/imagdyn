@@ -10,7 +10,7 @@ IMagDyn 读写的主要栅格与 JSON 约定。
 
 | 区间 | 含义 |
 |------|------|
-| `> 0.5` | 陆地 → 线性映射到 `0 … max_elev_m`（默认 **+8000 m**） |
+| `> 0.5` | 陆地 → 线性映射到 `0 … max_elev_m`（默认 **+8000 m**，见 [`imagdyn/params.py`](../imagdyn/params.py)） |
 | `< 0.5` | 海洋 → 线性映射到 `0 … min_elev_m`（默认 **−8000 m**） |
 
 海陆优先读 `Terrain - Land Mask.png`（白 = 陆）。没有遮罩时，`ensure` / viewer 用海拔 `> 0.5` 推导。
@@ -29,7 +29,7 @@ IMagDyn 读写的主要栅格与 JSON 约定。
 gray = clip((T_C − T_MIN) / (T_MAX − T_MIN) × 255)
 ```
 
-默认 `T_MIN = −60 °C`，`T_MAX = +45 °C`。同目录：
+默认 `T_MIN = −60 °C`，`T_MAX = +45 °C`（[`imagdyn/params.py`](../imagdyn/params.py) 的 `ENCODE`）。同目录：
 
 - `temperature_meta.json` — 生成参数与摘要
 - `temperature_stats.json` — `summarize` 写出的分区统计

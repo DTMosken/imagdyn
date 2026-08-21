@@ -116,7 +116,7 @@ python -m imagdyn pipeline --temperature
 传给气温 / 风场生成器的参数写在 `--` 之后，例如：
 
 ```bash
-python -m imagdyn temperature -- --cpu --maritime-iters 2 --no-wind
+python -m imagdyn temperature -- --cpu --spinup-years 6 --no-wind
 python -m imagdyn wind -- --annual-only --cpu
 ```
 
@@ -158,6 +158,7 @@ ensure → contours → temperature（含风） → summarize → viewer
 
 | 文件 | 用途 |
 |------|------|
+| `imagdyn/params.py` | 行星 / 气温 / 洋流 / 风场 / 编码 **全局默认参数**（调参改这里；CLI 仍可覆盖） |
 | `.imagdyn_env` | 首选 conda 环境名 |
 | `.imagdyn_lang` | `zh` / `en` |
 
@@ -171,7 +172,7 @@ ensure → contours → temperature（含风） → summarize → viewer
 
 ```text
 Full Elevation → ensure / contours
-              → temperature（辐射 + 海陆惯性 + 洋流 SST）
+              → temperature（热容能量平衡 + 海平面扩散 + 洋流通量）
               → wind（气压带 + 热力气压 → 地转/摩擦平衡 → 地形）
               → summarize / viewer
 ```
@@ -179,7 +180,7 @@ Full Elevation → ensure / contours
 | 主题 | 简述 | 详情 |
 |------|--------|------|
 | 数据格式 | 高程、气温、风场与 JSON 元数据 | [docs/data-formats.md](docs/data-formats.md) |
-| 气温 | TOA 日均辐射、热扩散海事缓冲、小湖惯性、洋流 SST | [docs/temperature.md](docs/temperature.md) |
+| 气温 | TOA 日均辐射、热容自旋、海平面扩散、洋流通量 | [docs/temperature.md](docs/temperature.md) |
 | 风场 / 气压 | 36 经度扇区余弦气压带、瑞利 AMC 副高、二次方阻力 | [docs/wind.md](docs/wind.md) |
 | Viewer | 本地静态服务、图层与风箭头、读数钉点 | [docs/viewer.md](docs/viewer.md) |
 
@@ -188,7 +189,7 @@ Full Elevation → ensure / contours
 ```text
 IMagDyn/
 ├── IMagDyn.cmd / IMagDyn.sh
-├── imagdyn/                 # Python 包（cli / temperature / wind / …）
+├── imagdyn/                 # Python 包（cli / params / temperature / wind / …）
 ├── viewer/index.html
 ├── docs/                    # 技术说明与 screenshots/
 └── graphs/                  # 地形、气温、风场产物
